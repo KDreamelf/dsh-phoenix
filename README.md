@@ -110,15 +110,22 @@ node tests/run.mjs
 
 ## 安装
 
-```bash
-dsh plugin --profile <name> add "E:/CodeProgram/杂项/系统安装与PE工具/dsh-phoenix"
-```
+**注意**：`desktop` profile 由 Electron 独占管理，CLI 拒绝操作它（`dsh --profile desktop --dump-config` 会报 `profile "desktop" is managed exclusively by the Electron application`）。所以装进桌面端只能：
 
-或开发期用 `link:`：
+- 走应用内的插件管理器，或
+- 手工改 `~/.dsh/profiles/desktop/package.json`：
 
 ```json
 "dependencies": { "dsh-phoenix": "link:E:/CodeProgram/杂项/系统安装与PE工具/dsh-phoenix" },
 "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-phoenix"] } }
+```
+
+**先别装进主 profile。** 这个插件接管的是 `uncaughtException`，装之前应当在独立 profile 里跑一遍 `tests/live-verify.md` 的流程，确认它和你的其它插件能共存。
+
+独立 profile 里这样装：
+
+```bash
+dsh plugin --profile <name> add "E:/CodeProgram/杂项/系统安装与PE工具/dsh-phoenix"
 ```
 
 ## 许可

@@ -1,0 +1,7 @@
+# Compatibility overlay: compose phoenix onto the real desktop profile
+# without touching it. Used only for a --dump-config check.
+- insert:
+    - id: phoenix
+      name: 'dsh-phoenix'
+      config:
+        enabled: true

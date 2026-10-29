@@ -169,3 +169,21 @@ rm -rf ~/.dsh/logs/crash-guard
 | P1 超时在真实会话里的效果 | 需要真实 agent 循环 + 一个会挂死的工具；seam 层已由测试覆盖 |
 | 原生崩溃 / OOM / SIGKILL | 进程内守卫**不覆盖**，需要外部 supervisor |
 | 启动期崩溃的 `doctor` 归因 | 需要人为构造 patch 解析失败；`doctor` 逻辑已由单元测试覆盖 |
+
+## 一个必须知道的限制
+
+`desktop` profile **由 Electron 独占管理**，CLI 拒绝操作它：
+
+```bash
+dsh --profile desktop --dump-config
+# error: profile "desktop" is managed exclusively by the Electron application
+```
+
+所以：
+
+- **不能用 `dsh --profile desktop` 做任何检查或修复**，包括 `--dump-config` 和 `--patch`
+- 装进 desktop 必须走应用内（插件管理器）或手工改 `~/.dsh/profiles/desktop/package.json`
+- 桌面端启动失败时的恢复，也只能靠上面那个「禁用第三方插件」按钮——这正是本插件要避免的路径
+
+测试与验证一律用独立 profile（如 `phoenix-dev`），不触碰 `desktop`。
+

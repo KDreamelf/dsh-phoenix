@@ -19,7 +19,6 @@
  *     broken import) cannot be caught here; use the CLI (`bin.js`).
  */
 
-import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -245,4 +244,4 @@ export function apply(ctx, rawConfig) {
 }
 
 /** Exposed for tests and the CLI; the module is otherwise a Cordis plugin. */
-export const internals = { describe, attribute, packageRoot, existsSync }
+export const internals = { describe, attribute, packageRoot }
