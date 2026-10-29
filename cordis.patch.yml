@@ -1,0 +1,14 @@
+# dsh-phoenix — mount the guard as a host row.
+# The row needs no configuration to start working; every field below has a
+# working default, so an empty `config` is also valid.
+- insert:
+    - id: phoenix
+      name: 'dsh-phoenix'
+      config:
+        enabled: true
+        quarantine: true
+        maxQuarantinePerRun: 2
+        protectOfficial: true
+        onUnattributable: log
+        toolDeadline: true
+        toolTimeoutMs: 1200000

@@ -1,0 +1,43 @@
+{
+  "name": "dsh-phoenix",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Keep DSH alive through plugin faults: contain the crash, quarantine only the failing row, leave providers untouched.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "bin": {
+    "dsh-phoenix": "./bin.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "bin.js",
+    "src/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node tests/run.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}

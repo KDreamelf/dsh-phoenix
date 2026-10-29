@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Phoenix",
+    "description": "Keeps DSH running when a plugin throws: attributes the fault, disables only the failing row, and never touches your provider configuration."
+  }
+}
