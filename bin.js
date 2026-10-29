@@ -10,9 +10,11 @@
  */
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 
 import { composePatchText, homePatchPath, readQuarantined } from './src/quarantine.js'
 import { logDirectory, logPath, pruneRecords, readRecords } from './src/log.js'
+import { readPendingRemovals } from './src/recovery.js'
 import { resolveHome } from './index.js'
 
 function out(line = '') {
@@ -27,10 +29,18 @@ function commandStatus(home) {
   const ids = readQuarantined(home)
   const records = readRecords(home)
   const contained = records.filter((entry) => entry.decision === 'quarantined')
+  const pending = readPendingRemovals(home)
+  const activation = [...records].reverse().find((entry) => entry.kind === 'guard-activated')
   out(`home:        ${home}`)
   out(`records:     ${logDirectory(home)}`)
   out(`count:       ${records.length}`)
   out(`quarantined: ${ids.length === 0 ? '(none)' : ids.join(', ')}`)
+  out(`pending:     ${pending.length === 0 ? '(none)' : pending.map((item) => item.package).join(', ')}`)
+  if (activation?.restart !== undefined) {
+    out(
+      `auto-restart:${activation.restart.ok === true ? ' available' : ` unavailable (${activation.restart.reason})`}`,
+    )
+  }
   if (contained.length > 0) {
     out()
     out('recent containments:')
@@ -150,6 +160,60 @@ function commandPrune(home) {
   return 0
 }
 
+/**
+ * Execute queued uninstalls through DSH's own plugin manager path.
+ *
+ * Deliberately a separate, explicit command: the crash handler only records an
+ * intent, because removing a package while the process that runs it is
+ * unhealthy is how a profile ends up half-broken. This runs in a clean process,
+ * against a profile whose culprit row is already disabled.
+ */
+function commandFinalize(home, args) {
+  const pending = readPendingRemovals(home)
+  if (pending.length === 0) {
+    out('Nothing queued for removal.')
+    return 0
+  }
+  const profile = args[0] ?? process.env.DSH_PROFILE
+  const doIt = args.includes('--yes')
+  out(`queued: ${pending.map((item) => item.package).join(', ')}`)
+  if (profile === undefined) {
+    err('No profile given. Pass one explicitly: dsh-phoenix finalize <profile> [--yes]')
+    err('(The crash handler records the profile it saw, but never assumes.)')
+    return 1
+  }
+  out(`profile: ${profile}`)
+  if (!doIt) {
+    out()
+    out('This will run, for each package:')
+    out(`  dsh plugin --profile ${profile} remove <package>`)
+    out()
+    out('Re-run with --yes to execute.')
+    return 0
+  }
+  let failures = 0
+  for (const item of pending) {
+    if (typeof item.package !== 'string' || item.package.length === 0) continue
+    out(`removing ${item.package} …`)
+    const result = spawnSync('dsh', ['plugin', '--profile', profile, 'remove', item.package], {
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    })
+    if (result.status !== 0) {
+      err(`remove failed for ${item.package} (exit ${String(result.status ?? 'signal')})`)
+      failures += 1
+    } else {
+      out(`removed ${item.package}`)
+    }
+  }
+  if (failures === 0) {
+    out()
+    out('All queued removals finished. The queue file is left in place for audit;')
+    out('delete it manually once you are satisfied.')
+  }
+  return failures === 0 ? 0 : 1
+}
+
 function commandPath(home) {
   out(homePatchPath(home))
   out(logPath(home))
@@ -171,6 +235,8 @@ async function main(argv) {
       return commandLogs(home, args)
     case 'prune':
       return commandPrune(home)
+    case 'finalize':
+      return commandFinalize(home, args)
     case 'path':
       return commandPath(home)
     case '--version':
@@ -190,6 +256,7 @@ async function main(argv) {
           '  restore --all       un-quarantine everything',
           '  logs [n]            recent contained failures',
           '  prune               drop records older than 30 days',
+          '  finalize <profile>  run queued removals (add --yes to execute)',
           '  path                print the patch and log locations',
           '',
           `home: ${home}`,

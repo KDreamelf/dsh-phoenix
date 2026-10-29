@@ -6,11 +6,11 @@ DSH 默认是 **fail-loud**：任何未捕获异常或未处理拒绝都会让�
 
 一个插件的坏定时器，代价可以是你的全部配置。
 
-不死鸟把「进程死亡」换成「记录 + 归因 + 只隔离出事的那一行 + 继续运行」。
+不死鸟把「进程死亡」换成「**崩溃页等你决定 + 只隔离出事的那一行 + 换一个干净进程**」。
 
-## 三件事
+## 它怎么工作
 
-### P0 · 进程守卫
+### 1 · 进程守卫
 
 | 行为 | 说明 |
 |---|---|
@@ -24,23 +24,39 @@ DSH 默认是 **fail-loud**：任何未捕获异常或未处理拒绝都会让�
 
 **为什么写 home 层**：层级顺序是 `bundle → profile patch → $DSH_HOME/cordis.patch.yml → --patch`，home 层覆盖 profile 层。所以只加一行 `disabled: true` 就够，你的 provider、apiKeyEnv、模型列表一个字节都不动。
 
-### P1 · 工具超时
+### 2 · 崩溃页（核心）
 
-DSH 的 `await tool.execute(...)` **没有超时**，而自带的 `dsh-tool-call-timeout-policy` 是**协作式**的——它只在函数体结算**之后**替换结果，对永不结算的函数体无能为力。用户点 Cancel 也只是发一个 abort 信号，不强制关 turn，于是 `phase` 永远停在 `running`，那个会话拒绝任何新工作，**只能重启恢复**。
+捕获到致命错误时，**进程不退出**，而是把宿主已经开着的 HTTP 服务里挂一个页面：`/phoenix/crash`。
 
-不死鸟在 `tools/execute` 上以 `prepend: true` 挂一个非协作式竞速：超时抛出 `ToolDeadlineError`，被 `dsh-tools` 的 catch 转成 `toolErrorResult`，**会话继续**。超时同时 abort `exec.signal`，让守规矩的工具自己停下。
+那是一个**自包含的 HTML 文档**，不依赖 React——因为 React 树可能已经被卸载了，这时候任何用 React 写的 UI 都跟着一起消失。页面是普通 HTTP 响应，浏览器照常渲染。
 
-被遗弃的 promise 仍在后台跑——这是刻意接受的泄漏，因为一次泄漏的代价远小于一个不可恢复的会话。
+页面显示肇事插件的**图标、名称、版本、安装路径、介绍、完整错误栈**，然后给你三个选择：
 
-> 定时器**故意不加 `unref`**：加了之后 Node 会在超时仍挂起时判定事件循环空闲并退出，恰好毁掉这个守卫要处理的场景（一个永不结算、也不持有其它句柄的工具）。
+| 按钮 | 行为 |
+|---|---|
+| **给个机会** | 什么都不改，直接换进程重启 |
+| **停职** | 往 home 层写该行 `disabled: true`，然后换进程重启 |
+| **开除** | 同上，另外记一条待卸载（见下方说明） |
 
-### P2 · 白屏救援
+**为什么必须"先隔离再重启"**：直接 `location.reload()` 会对着同一个坏进程重新加载，照样崩。所以顺序是「写隔离 → 换进程 → 页面重载」，重载后连上的是干净宿主。
+
+**支持 `?phoenix=rescue`** 手动唤起这个页面。
+
+### 3 · 白屏救援
 
 `SlotAssemblyError` 会被渲染器的错误边界**故意重新抛出**，React 随后卸载整棵树——整页纯色，连用 React 写的救援 UI 也一起消失。
 
-所以救援用原生 `window` 监听 + 原生 DOM 覆盖层，活在 React 树之外。只在命中致命签名时出现（`SlotAssemblyError`、`root` 未注册、缺 `hookContext`、缺 locale face、缺 session adapter、最大更新深度），正常的一格崩溃不会打扰你。
+所以这一层用原生 `window` 监听 + 原生 DOM 覆盖层，活在 React 树之外。只在命中致命签名时出现（`SlotAssemblyError`、`root` 未注册、缺 `hookContext`、缺 locale face、缺 session adapter、最大更新深度），正常的一格崩溃不会打扰你。
 
-也支持 `?phoenix=rescue` 强制唤起，和控制台里的 `window.__DSH_PHOENIX__.force()`。
+也支持控制台里的 `window.__DSH_PHOENIX__.force()`。
+
+## 为什么没有工具超时
+
+这是刻意的，不是漏做。
+
+DSH 不给工具设墙上时钟超时是有意的：**一个跑三小时的 cargo 编译、一个监听好几天的抢票脚本，都是正常用法**。管超时会把这些合法工作杀掉。长时间任务本来就有正确的去处——后台作业系统。
+
+至于"用户按了取消但工具不理"，那是会话卡死，属于**受伤**：卡死之后重启就恢复，而重启现在是一次点击的事。用杀长任务去换这个场景不值得。
 
 ## 做不到什么（诚实边界）
 
@@ -50,7 +66,10 @@ DSH 的 `await tool.execute(...)` **没有超时**，而自带的 `dsh-tool-call
 | V8 OOM abort | `Allocation failed` 不可 catch | 外部 supervisor |
 | `SIGKILL` / 断电 | JS 无法运行 | 外部 supervisor |
 | 启动期失败（`!!js` 抛错、patch 解析失败、import 失败） | 那时本插件还没加载 | 下面的 CLI |
-| 工具挂死但超时被配成 `0`/`null` | 那是你明确关掉的 | 改配置 |
+| 没有任何 HTTP 服务在跑 | 崩溃页没地方挂 | CLI；或先隔离再手动重开 |
+| 会话卡死（工具不理取消） | 这是受伤，不是死亡 | 重启 |
+
+**关于「开除」**：崩溃态下**不会**立刻删包。那次崩溃可能已经把进程留在不可信状态，此时跑 pnpm 卸载是在摇晃的地基上施工。所以「开除」= 先隔离（保证下次能起来）+ 写一条待卸载记录，真正的卸载在下次干净启动后由 CLI 完成。这样最坏情况也只是"插件被禁用但还在硬盘上"，绝不会到"包删了一半、profile 起不来"。
 
 ## CLI
 
@@ -88,11 +107,9 @@ dsh --profile <name> --patch ./overlay.yml
     maxQuarantinePerRun: 2      # 熔断，防一次事故连坐
     protectOfficial: true       # @deepseek-ai/ 永不自动禁用
     onUnattributable: log       # log | exit（exit 退回 fail-loud）
-    toolDeadline: true          # P1 总开关
-    toolTimeoutMs: 1200000      # 默认 20 分钟；0 或 null 关闭
-    toolTimeouts:               # 按工具名覆盖
-      bash: 3600000
 ```
+
+崩溃页的行为不需要配置：有致命错误就挂住宿主，等你决定。
 
 ## 一个必须记住的坑
 
@@ -106,7 +123,9 @@ dsh --profile <name> --patch ./overlay.yml
 node tests/run.mjs
 ```
 
-25 项，覆盖归因（含 `link:` 路径、前缀误匹配、恶意 `toString`、cause 环）、隔离写入（provider 保留、块幂等、空文件回归、磁盘往返）、工具超时（覆盖优先级、被弃函数体、迟到结果不能覆盖超时、seam 接线）、插件行为（只隔离肇事者、官方包受保护、卸载还原宿主 handler）、客户端救援（致命签名才绘制、幂等、卸载清理）。
+25 项，覆盖归因（含 `link:` 路径、前缀误匹配、恶意 `toString`、cause 环）、隔离写入（provider 保留、块幂等、空文件回归、磁盘往返）、崩溃页（HTML 转义、三按钮、无法归因时禁用动作按钮、选择校验）、恢复流程（无 webserver 降级、三路由注册与卸载、停职先写隔离再换进程、开除排队卸载）、元数据（从栈帧定位包目录、图标内联）、自重启（只拒绝真正的 Electron 主进程）、插件行为（只隔离肇事者、官方包受保护、卸载还原宿主 handler）、客户端救援（致命签名才绘制、幂等、卸载清理）。
+
+有一条实测记录在 `tests/live-verify.md`：崩溃 → 崩溃页 200 → 点停职 → 隔离落盘 → 新进程起来（不同 PID，创建时间对得上）→ 不再崩溃。
 
 ## 安装
 

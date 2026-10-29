@@ -25,7 +25,18 @@ import { join } from 'node:path'
 import { attribute, causeChain, describe, packageRoot } from './src/attribution.js'
 import { readQuarantined, writeQuarantine } from './src/quarantine.js'
 import { localDay, logPath, writeRecord } from './src/log.js'
-import { installToolDeadline } from './src/tool-deadline.js'
+import { beginRecovery, crashPageUrl } from './src/recovery.js'
+import { describePackage } from './src/meta.js'
+import { restartCommand } from './src/self-restart.js'
+
+/** The web carrier, when this composition has one. The service key is `webServer`. */
+function safeWebserver(ctx) {
+  try {
+    return ctx.get?.('webServer')
+  } catch {
+    return undefined
+  }
+}
 
 export const name = 'dsh-phoenix'
 
@@ -60,9 +71,6 @@ function normalizeConfig(raw) {
         : 2,
     protectOfficial: config.protectOfficial !== false,
     onUnattributable: config.onUnattributable === 'exit' ? 'exit' : 'log',
-    toolDeadline: config.toolDeadline !== false,
-    toolTimeoutMs: config.toolTimeoutMs === undefined ? 1_200_000 : config.toolTimeoutMs,
-    toolTimeouts: config.toolTimeouts ?? {},
   }
 }
 
@@ -85,6 +93,8 @@ export function apply(ctx, rawConfig) {
   let budget = config.maxQuarantinePerRun
   let handled = 0
   let active = true
+  let recovery
+  let recovering = false
 
   const record = (entry) => {
     writeRecord(home, {
@@ -101,6 +111,51 @@ export function apply(ctx, rawConfig) {
     } catch {
       /* nothing left to write to */
     }
+  }
+
+  /**
+   * Open the crash page and hold the process so an operator can decide.
+   * @returns true when the hold is active and the caller must not exit.
+   */
+  const openRecovery = (fault) => {
+    recovering = true
+    const meta = describePackage(fault.described.stack)
+    const report = {
+      kind: fault.kind,
+      package: fault.pkg ?? meta.packageName ?? null,
+      title: meta.title,
+      description: meta.description,
+      version: meta.version,
+      packageDir: meta.packageDir,
+      icon: meta.icon,
+      rowIds: fault.rows.map((row) => row.id),
+      message: fault.described.message,
+      stack: fault.described.stack,
+      decision: fault.decision,
+      reason: fault.reason,
+      alreadyQuarantined: quarantined.size > 0,
+    }
+
+    let opened
+    try {
+      opened = beginRecovery({ ctx, home, report })
+    } catch (error) {
+      recovering = false
+      notify(`could not open the recovery page (${describe(error).message}); falling back to exit`)
+      return false
+    }
+
+    if (!opened.available) {
+      recovering = false
+      return false
+    }
+
+    recovery = opened
+    notify(
+      `fatal ${fault.kind} from ${report.package ?? 'unknown'}; holding the process and serving the crash page. ` +
+        `Open ${crashPageUrl(safeWebserver(ctx))} to decide.`,
+    )
+    return true
   }
 
   /** Contain one process-level fault. Never exits unless configured to. */
@@ -170,6 +225,23 @@ export function apply(ctx, rawConfig) {
       }),
     })
 
+    // Hand the fault to the recovery surface. It keeps the process alive so the
+    // crash page can be served, then replaces the process once the operator
+    // chooses. Only the first fault opens a hold; a second one during recovery
+    // is recorded and nothing else, so a broken listener cannot stack windows.
+    if (active && !recovering) {
+      const opened = openRecovery({
+        kind,
+        pkg,
+        rows,
+        described,
+        decision,
+        reason,
+        quarantinedIds,
+      })
+      if (opened) return
+    }
+
     if (decision === 'quarantined') {
       notify(
         `contained ${kind} from ${pkg ?? 'unknown'}; quarantined row ${quarantinedIds.join(', ')} for the next start. ` +
@@ -207,10 +279,22 @@ export function apply(ctx, rawConfig) {
       quarantinedIds: [...quarantined],
       error: null,
       causes: [],
+      // Probe the reset capability once, so `dsh-phoenix status` can tell the
+      // operator up front whether "disable and restart" will really restart.
+      restart: (() => {
+        const spec = restartCommand()
+        return spec.ok ? { ok: true } : { ok: false, reason: spec.reason }
+      })(),
     })
 
     return () => {
       active = false
+      try {
+        recovery?.release?.()
+      } catch {
+        /* route teardown is best-effort */
+      }
+      recovering = false
       process.removeListener('unhandledRejection', onRejection)
       process.removeListener('uncaughtException', onException)
       for (const listener of previousRejection) process.on('unhandledRejection', listener)
@@ -218,29 +302,12 @@ export function apply(ctx, rawConfig) {
     }
   })
 
-  // Tool deadline: bound a hung tool so one bad call cannot wedge a session.
-  const disposeDeadline = installToolDeadline(ctx, config, (entry) => {
-    record({
-      kind: entry.kind,
-      package: null,
-      rows: [],
-      decision: 'abandoned',
-      reason: `tool:${entry.tool}`,
-      quarantinedIds: [],
-      error: {
-        name: 'ToolDeadlineError',
-        message: `tool "${entry.tool}" exceeded ${entry.timeoutMs} ms`,
-        code: 'TOOL_DEADLINE_EXCEEDED',
-        stack: '',
-      },
-      causes: [],
-      tool: entry.tool,
-      timeoutMs: entry.timeoutMs,
-      elapsedMs: entry.elapsedMs,
-    })
-    notify(`abandoned tool "${entry.tool}" after ${entry.elapsedMs} ms; the session continues`)
-  })
-  ctx.effect(() => disposeDeadline)
+  // Deliberately no tool deadline. A tool that runs for hours is doing its job:
+  // a cargo build, a poller that watches for days. DSH leaves the wall-clock
+  // decision to the tool on purpose, and long work already has a proper home in
+  // the background-job system. Bounding it here would kill legitimate work to
+  // rescue a case that a restart already fixes. A wedged session is an injury,
+  // not death.
 }
 
 /** Exposed for tests and the CLI; the module is otherwise a Cordis plugin. */

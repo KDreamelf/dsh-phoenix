@@ -1,16 +1,18 @@
 /**
  * dsh-phoenix test suite.
  *
- * Covers the four things that can silently regress:
+ * Covers the three things that can silently regress:
  *   1. attribution  — wrong package means quarantining an innocent plugin
  *   2. quarantine   — a malformed patch layer bricks the NEXT boot
- *   3. deadline     — a missing bound means a wedged session
- *   4. client rescue — a rescue that throws is worse than none
+ *   3. client rescue — a rescue that throws is worse than none
+ *
+ * There is deliberately no tool-deadline suite: the plugin does not bound tool
+ * runtime. Long work is legitimate; a wedged session is an injury, not death.
  *
  * Run: node tests/run.mjs
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -165,101 +167,7 @@ await test('quarantine: round-trips through disk', () => {
   }
 })
 
-// ── 3. tool deadline ──────────────────────────────────────────────────────────
-const deadline = await import('../src/tool-deadline.js')
-
-await test('deadline: per-tool override wins over the global default', () => {
-  const config = { toolTimeoutMs: 1000, toolTimeouts: { bash: 50 } }
-  assert.equal(deadline.resolveDeadline({ name: 'bash' }, config), 50)
-  assert.equal(deadline.resolveDeadline({ name: 'read' }, config), 1000)
-})
-
-await test('deadline: zero and null disable the bound', () => {
-  assert.equal(deadline.resolveDeadline({ name: 'read' }, { toolTimeoutMs: 0 }), undefined)
-  assert.equal(deadline.resolveDeadline({ name: 'read' }, { toolTimeoutMs: null }), undefined)
-  assert.equal(
-    deadline.resolveDeadline({ name: 'bash' }, { toolTimeoutMs: 1000, toolTimeouts: { bash: 0 } }),
-    undefined,
-  )
-})
-
-await test('deadline: a fast body resolves untouched', async () => {
-  const value = await deadline.withDeadline(async () => 'ok', 1000, 'read')
-  assert.equal(value, 'ok')
-})
-
-await test('deadline: a body error propagates as itself', async () => {
-  const boom = new Error('body failed')
-  await assert.rejects(
-    deadline.withDeadline(async () => {
-      throw boom
-    }, 1000, 'read'),
-    (error) => error === boom,
-  )
-})
-
-await test('deadline: a hung body is abandoned with TOOL_DEADLINE_EXCEEDED', async () => {
-  let aborted = false
-  const startedAt = Date.now()
-  await assert.rejects(
-    deadline.withDeadline(() => new Promise(() => {}), 40, 'stuck', () => {
-      aborted = true
-    }),
-    (error) => error instanceof deadline.ToolDeadlineError && error.code === 'TOOL_DEADLINE_EXCEEDED',
-  )
-  assert.ok(aborted, 'onTimeout must run')
-  assert.ok(Date.now() - startedAt < 1000, 'must not wait for the body')
-})
-
-await test('deadline: a late body result cannot override the timeout', async () => {
-  const guarded = deadline.withDeadline(
-    () => new Promise((resolve) => setTimeout(() => resolve('late'), 80)),
-    25,
-    'slow',
-  )
-  await assert.rejects(guarded, /deadline/)
-  // If the late resolution leaked through, this would resolve instead.
-  await new Promise((resolve) => setTimeout(resolve, 100))
-})
-
-// ── 4. plugin behaviour against a fake host ───────────────────────────────────
-await test('deadline seam: installs on tools/execute with prepend', async () => {
-  let captured
-  const ctx = {
-    on: (name, handler, options) => {
-      captured = { name, handler, options }
-      return () => {}
-    },
-  }
-  const reports = []
-  deadline.installToolDeadline(ctx, { toolTimeoutMs: 30 }, (entry) => reports.push(entry))
-  assert.equal(captured.name, 'tools/execute')
-  assert.equal(captured.options?.prepend, true, 'must run before the cooperative policy')
-
-  // A hung next(): the seam must reject with the deadline error and report it.
-  const exec = { name: 'fake-hung-tool', signal: { abort() {} } }
-  await assert.rejects(captured.handler(exec, () => new Promise(() => {})), /deadline/)
-  assert.equal(reports.length, 1)
-  assert.equal(reports[0].tool, 'fake-hung-tool')
-  assert.equal(reports[0].timeoutMs, 30)
-})
-
-await test('deadline seam: a fast tool call passes straight through', async () => {
-  let captured
-  const ctx = { on: (name, handler, options) => ((captured = { handler }), () => {}) }
-  deadline.installToolDeadline(ctx, { toolTimeoutMs: 5000 }, () => {})
-  const result = await captured.handler({ name: 'read', signal: { abort() {} } }, async () => 'tool-result')
-  assert.equal(result, 'tool-result')
-})
-
-await test('deadline seam: toolDeadline:false installs nothing', () => {
-  let called = false
-  const ctx = { on: () => ((called = true), () => {}) }
-  const dispose = deadline.installToolDeadline(ctx, { toolDeadline: false }, () => {})
-  assert.equal(called, false)
-  assert.equal(typeof dispose, 'function')
-})
-
+// ── 3. plugin behaviour against a fake host ───────────────────────────────────
 await test('plugin: contains a fault, quarantines only the culprit, keeps providers', async () => {
   const home = freshHome('plugin')
   const previousHome = process.env.DSH_HOME
@@ -331,8 +239,8 @@ await test('plugin: dispose restores the host handlers it replaced', async () =>
     const ctx = {
       get: () => undefined,
       effect: (fn) => {
-        // The plugin registers more than one effect (process guard, tool
-        // deadline); dispose must run all of them, so collect every cleanup.
+        // The plugin may register more than one effect; dispose must run all of
+        // them, so collect every cleanup rather than keeping only the last.
         const dispose = fn()
         if (typeof dispose === 'function') cleanups.push(dispose)
         return () => dispose?.()
@@ -350,6 +258,216 @@ await test('plugin: dispose restores the host handlers it replaced', async () =>
     else process.env.DSH_HOME = previousHome
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ── 4. crash page and recovery surface ────────────────────────────────────────
+const crashPage = await import('../src/crash-page.js')
+const recovery = await import('../src/recovery.js')
+const meta = await import('../src/meta.js')
+const selfRestart = await import('../src/self-restart.js')
+
+const sampleReport = {
+  kind: 'uncaughtException',
+  package: 'some-broken-plugin',
+  title: 'Broken Plugin',
+  description: 'A plugin that throws from a timer.',
+  packageDir: 'C:/plugins/some-broken-plugin',
+  icon: undefined,
+  rowIds: ['broken-plugin'],
+  message: 'boom',
+  stack: 'Error: boom\n    at run (C:/plugins/node_modules/some-broken-plugin/lib/index.js:1:1)',
+}
+
+await test('crash page: renders identity, path, stack and three choices', () => {
+  const html = crashPage.renderCrashPage(sampleReport)
+  assert.ok(html.startsWith('<!DOCTYPE html>'), 'must be a standalone document')
+  assert.ok(html.includes('Broken Plugin'), 'title missing')
+  assert.ok(html.includes('some-broken-plugin'), 'package missing')
+  assert.ok(html.includes('C:/plugins/some-broken-plugin'), 'path missing')
+  assert.ok(html.includes('boom'), 'message missing')
+  assert.ok(html.includes('data-choice="retry"'), 'retry button missing')
+  assert.ok(html.includes('data-choice="disable"'), 'disable button missing')
+  assert.ok(html.includes('data-choice="remove"'), 'remove button missing')
+  assert.ok(html.includes('给个机会') && html.includes('停职') && html.includes('开除'))
+})
+
+await test('crash page: escapes hostile field values', () => {
+  const html = crashPage.renderCrashPage({
+    ...sampleReport,
+    title: '<img src=x onerror=alert(1)>',
+    description: '</style><script>alert(1)</script>',
+    message: '"><script>alert(2)</script>',
+  })
+  assert.ok(!html.includes('<script>alert(1)</script>'), 'description not escaped')
+  assert.ok(!html.includes('<img src=x onerror=alert(1)>'), 'title not escaped')
+  assert.ok(html.includes('&lt;script&gt;'), 'escaped form missing')
+})
+
+await test('crash page: unattributable faults disable the acting buttons', () => {
+  const html = crashPage.renderCrashPage({ ...sampleReport, package: null, rowIds: [] })
+  assert.ok(/data-choice="disable" disabled/.test(html), 'disable must be disabled')
+  assert.ok(/data-choice="remove" disabled/.test(html), 'remove must be disabled')
+  assert.ok(/data-choice="retry"(?! disabled)/.test(html), 'retry must stay enabled')
+})
+
+await test('crash page: readChoice accepts only the three known answers', () => {
+  assert.equal(crashPage.readChoice('{"choice":"retry"}'), 'retry')
+  assert.equal(crashPage.readChoice('{"choice":"disable"}'), 'disable')
+  assert.equal(crashPage.readChoice('{"choice":"remove"}'), 'remove')
+  assert.equal(crashPage.readChoice('{"choice":"nuke"}'), undefined)
+  assert.equal(crashPage.readChoice('not json'), undefined)
+  assert.equal(crashPage.readChoice(''), undefined)
+})
+
+await test('recovery: unavailable without a webserver', () => {
+  const home = freshHome('no-web')
+  try {
+    const controller = recovery.beginRecovery({
+      ctx: { get: () => undefined },
+      home,
+      report: sampleReport,
+      exit: () => {},
+      restart: () => ({ ok: true, pid: 1 }),
+    })
+    assert.equal(controller.available, false)
+    controller.release()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('recovery: registers the three routes and serves the page', async () => {
+  const home = freshHome('routes')
+  const routes = new Map()
+  try {
+    const controller = recovery.beginRecovery({
+      ctx: {
+        get: (service) =>
+          service === 'webServer'
+            ? {
+                register: (route) => {
+                  routes.set(route.path, route)
+                  return () => routes.delete(route.path)
+                },
+              }
+            : undefined,
+      },
+      home,
+      report: sampleReport,
+      exit: () => {},
+      restart: () => ({ ok: true, pid: 1 }),
+    })
+    assert.equal(controller.available, true)
+    assert.ok(routes.has(crashPage.CRASH_ROUTE))
+    assert.ok(routes.has(crashPage.DECIDE_ROUTE))
+    assert.ok(routes.has(crashPage.STATUS_ROUTE))
+
+    // GET the page.
+    let body = ''
+    const res = {
+      writeHead() {},
+      end(chunk) {
+        body += chunk ?? ''
+      },
+    }
+    routes.get(crashPage.CRASH_ROUTE).handler({ method: 'GET' }, res)
+    assert.ok(body.includes('Broken Plugin'))
+
+    controller.release()
+    assert.equal(routes.size, 0, 'release must remove every route')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('recovery: disable writes quarantine before restarting', async () => {
+  const home = freshHome('decide')
+  let restarted = 0
+  let exited
+  try {
+    const controller = recovery.beginRecovery({
+      ctx: { get: () => undefined },
+      home,
+      report: sampleReport,
+      exit: (code) => {
+        exited = code
+      },
+      restart: () => {
+        restarted += 1
+        return { ok: true, pid: 4242 }
+      },
+    })
+    // No webserver: settle is still the code path under test for apply().
+    const result = controller.settle('disable')
+    assert.equal(result.ok, true, JSON.stringify(result))
+    const quarantine = await import('../src/quarantine.js')
+    assert.deepEqual(quarantine.readQuarantined(home), ['broken-plugin'], 'quarantine not written')
+    assert.equal(restarted, 1, 'process was not replaced')
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    assert.equal(exited, 1, 'old process did not exit')
+    controller.release()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('recovery: remove queues an uninstall for the next clean start', async () => {
+  const home = freshHome('remove')
+  try {
+    const controller = recovery.beginRecovery({
+      ctx: { get: () => undefined },
+      home,
+      report: sampleReport,
+      exit: () => {},
+      restart: () => ({ ok: true, pid: 1 }),
+    })
+    const result = controller.settle('remove')
+    assert.equal(result.ok, true)
+    const pending = recovery.readPendingRemovals(home)
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0].package, 'some-broken-plugin')
+    controller.release()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('meta: finds the package directory from a stack frame', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'phoenix-meta-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'demo-plugin', description: 'from manifest' }))
+    mkdirSync(join(dir, 'lib'), { recursive: true })
+    writeFileSync(join(dir, 'lib', 'index.js'), '// demo\n')
+    mkdirSync(join(dir, 'locale'), { recursive: true })
+    writeFileSync(join(dir, 'locale', 'en.json'), JSON.stringify({ meta: { title: 'Demo', description: 'from locale' } }))
+    writeFileSync(join(dir, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>')
+
+    const described = meta.describePackage(
+      `Error: boom\n    at run (${join(dir, 'lib', 'index.js')}:1:1)`,
+    )
+    assert.equal(described.packageName, 'demo-plugin')
+    assert.equal(described.title, 'Demo')
+    assert.equal(described.description, 'from locale')
+    assert.ok(String(described.icon).startsWith('data:image/svg+xml;base64,'), 'icon not inlined')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('meta: survives a stack with no resolvable package', () => {
+  const described = meta.describePackage('Error: x\n    at <anonymous>')
+  assert.deepEqual(described, {})
+})
+
+await test('self-restart: refuses only a real Electron main process', () => {
+  const electronMain = selfRestart.restartCommand({}, { electron: '38.0.0' })
+  assert.equal(electronMain.ok, false)
+  assert.equal(electronMain.reason, 'electron-main-process')
+
+  // A host launched BY Electron with ELECTRON_RUN_AS_NODE=1 is an ordinary Node
+  // process: argv[1] is a script, so replacing it is legitimate.
+  const asNode = selfRestart.restartCommand({ ELECTRON_RUN_AS_NODE: '1' }, { electron: '38.0.0' })
+  assert.notEqual(asNode.reason, 'electron-main-process')
 })
 
 // ── 5. client rescue, driven through a fake DOM ───────────────────────────────

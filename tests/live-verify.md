@@ -4,6 +4,59 @@
 
 环境：DSH 0.2.1-rc.2（`dsh` CLI），Windows，Node 22。
 
+## 验证 0：崩溃页全链路（最重要）
+
+这是这个插件的核心行为。准备见下方「准备」段落，然后把 `fake-crashy` 加进 profile 的 bundles。
+
+```bash
+rm -f ~/.dsh/cordis.patch.yml
+rm -rf ~/.dsh/logs/crash-guard
+dsh --profile phoenix-dev --no-open --port 3101
+```
+
+约 6 秒后 fixture 抛错。期望宿主**不退出**，转而服务崩溃页：
+
+```bash
+curl -s -o /tmp/cp.html -w "%{http_code}\n" http://127.0.0.1:3101/phoenix/crash
+# 200
+grep -o "DSH 崩溃恢复\|给个机会\|停职\|开除\|fake-crashy" /tmp/cp.html
+```
+
+然后点「停职」（等于是页面上的按钮被按下）：
+
+```bash
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"choice":"disable"}' http://127.0.0.1:3101/phoenix/decide
+# {"ok":true,"message":"已禁用：fake-crashy"}
+```
+
+期望接下来发生三件事：
+
+1. `~/.dsh/cordis.patch.yml` 出现托管块，只含 `- id: "fake-crashy"` + `disabled: true`
+2. **旧进程退出**（后台任务以 exit 1 结束，这是设计行为）
+3. **新进程起来**并重新监听同一端口
+
+```bash
+sleep 14
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3101/          # 401 = 新进程在服务
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3101/phoenix/crash  # 404 = 新进程不在恢复态
+```
+
+实测记录（本轮）：
+
+| 检查点 | 结果 |
+|---|---|
+| 崩溃页 | `HTTP 200`，5416 字节，含标题与非托管插件名 `fake-crashy` |
+| `/phoenix/status` | `{"ok":true,"recovering":true,"decided":false,…}`，含完整栈 |
+| POST disable | `{"ok":true,"message":"已禁用：fake-crashy"}` |
+| 隔离落盘 | 托管块只含 `fake-crashy` |
+| 旧进程 | 后台任务 exit 1 |
+| 新进程 | `HTTP 401`，`/phoenix/crash` 变 404；`Get-CimInstance` 显示只有**一个新 PID**，创建时间正是点停职的那一刻 |
+| 新进程记录 | `guard-activated` 的 `quarantinedIds` 已含 `fake-crashy` |
+| 二次崩溃 | 无 |
+
+`dsh-phoenix status` 现在会报告 `auto-restart: available`——它是在插件激活时探一次 `restartCommand()` 得出的，让你事先就知道「停职」能不能真的自动重启。
+
 ## 准备
 
 一个隔离的测试 profile，**不碰你的主 profile**：
@@ -165,8 +218,9 @@ rm -rf ~/.dsh/logs/crash-guard
 
 | 项 | 原因 |
 |---|---|
-| 浏览器里真实的白屏救援 | 无浏览器控制；只能证明模块分发与产物有效 |
-| P1 超时在真实会话里的效果 | 需要真实 agent 循环 + 一个会挂死的工具；seam 层已由测试覆盖 |
+| 浏览器里真实点击崩溃页按钮 | 无浏览器控制。HTTP 层已实测（200 / 状态 / 决策端点都通），DOM 交互只在桩里验证过 |
+| Electron 桌面端的行为 | `desktop` profile 被 Electron 独占，CLI 不能操作；本轮所有实测都在独立的 `phoenix-dev` 上 |
+| 「开除」真正执行卸载 | 只验证到「记录待卸载」。`finalize` 会调 `dsh plugin remove`，未在真实包上跑过 |
 | 原生崩溃 / OOM / SIGKILL | 进程内守卫**不覆盖**，需要外部 supervisor |
 | 启动期崩溃的 `doctor` 归因 | 需要人为构造 patch 解析失败；`doctor` 逻辑已由单元测试覆盖 |
 
