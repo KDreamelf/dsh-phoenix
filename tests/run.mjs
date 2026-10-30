@@ -658,6 +658,47 @@ await test('rescue: an all-official composition needs no overlay', () => {
   assert.equal(yaml, undefined)
 })
 
+await test('rescue: the overlay is temporary — it never touches the profile or the home patch', () => {
+  const home = freshHome('rescue-temp')
+  try {
+    const prepared = recoverySession.prepareResurrection({
+      home,
+      rows: [
+        { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' },
+        { id: 'community-thing', name: 'dsh-community-thing' },
+      ],
+    })
+    assert.equal(prepared.ok, true)
+    // It lives beside the crash logs, which is not a layer any normal boot reads.
+    assert.ok(prepared.overlayPath.startsWith(join(home, 'logs', 'crash-guard')))
+    // The two ways a rescue could become permanent, both unused.
+    assert.equal(existsSync(join(home, 'cordis.patch.yml')), false, 'home patch must stay untouched')
+    assert.ok(prepared.disabled.includes('community-thing'))
+    assert.ok(!prepared.disabled.includes('agent-loop'), 'official rows are not suspects')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('rescue: a machine code is never shown to the operator verbatim', () => {
+  const desktop = recoverySession.describeRescueFailure('desktop-profile-is-app-managed')
+  assert.ok(!desktop.includes('desktop-profile-is-app-managed'), 'the raw code must be translated')
+  assert.ok(desktop.includes('点击') === false && desktop.length > 20, 'and it must say what to do')
+  // Unknown codes survive rather than being swallowed: silence would hide a real bug.
+  assert.equal(recoverySession.describeRescueFailure('something-new'), 'something-new')
+  assert.ok(recoverySession.describeRescueFailure(undefined).length > 0)
+})
+
+await test('crash page: the unattributable note is a safe mode, not a threat', () => {
+  const html = crashPage.renderCrashPage({ ...sampleReport, package: null, rowIds: [] })
+  // Facts the operator needs, and the words that carry them.
+  assert.ok(html.includes('安全模式'), 'must name the analogy')
+  assert.ok(html.includes('关掉重开'), 'must say it ends by itself')
+  assert.ok(html.includes('供应商'), 'must say providers are untouched')
+  // It must not read as "we could not find the culprit, so we will disable things".
+  assert.ok(!html.includes('所以不会自动禁用任何东西'))
+})
+
 await test('blocking: threshold is reached by consecutive errors only', () => {
   const home = freshHome('blocking')
   try {

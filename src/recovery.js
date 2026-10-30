@@ -37,6 +37,7 @@ import {
   renderCrashPage,
 } from './crash-page.js'
 import { readQuarantined, writeQuarantine } from './quarantine.js'
+import { describeRescueFailure } from './recovery-session.js'
 import { spawnReplacement } from './self-restart.js'
 
 /** How long the process waits for an operator before giving up. */
@@ -173,7 +174,7 @@ export function beginRecovery(options) {
       }
       const result = await options.launchRescue()
       if (result?.ok !== true) {
-        return { ok: false, error: result?.reason ?? result?.message ?? '无法启动复活会话' }
+        return { ok: false, error: describeRescueFailure(result?.reason ?? result?.message) }
       }
       return { ok: true, url: result.url, message: '复活会话已就绪，正在打开…' }
     }

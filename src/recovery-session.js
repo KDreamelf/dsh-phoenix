@@ -1,23 +1,27 @@
 /**
- * Resurrection mode: keep the providers, drop the suspects, let the AI work.
+ * Resurrection mode: one boot with the suspects left out — Windows safe mode.
  *
- * The rescue profile in safe-session.js has one flaw that matters more than any
- * other: it has no model provider, so the AI in it cannot answer. "Ask the AI to
- * fix it" is meaningless if the AI has nothing to talk through.
+ * Two properties define it, and both are load-bearing:
  *
- * So this does not build a separate profile. It reuses the operator's own, which
- * already holds every provider definition, and adds ONE overlay that disables
- * every non-official row it can see:
+ *   1. It is TEMPORARY. The overlay lives in one file under the log directory
+ *      and reaches DSH only through `--patch`, which applies to this one
+ *      process. Nothing is written to the profile or to the home patch layer,
+ *      so closing this session and starting DSH again boots normally. A rescue
+ *      that left the profile altered would not be a safe mode; it would be a
+ *      second, slower way to lose the setup.
  *
- *   dsh --profile <theirs> --patch <overlay that disables third-party rows>
+ *   2. It never touches the provider configuration. That config is the `config`
+ *      of official rows (`llm-pi-ai`, `llm-deepseek`, `agent-default-model`),
+ *      and those rows are kept unconditionally. A provider created by a plugin
+ *      does disappear — but that is the plugin's own removal, not something
+ *      this guard deleted, and it can only happen after the plugin is stopped.
  *
- * What survives: dsh-base, dsh-web-app, every @deepseek-ai/ row, every
- * cordis:* builtin, and — critically — the provider configuration, because that
- * lives in an official row's config, not in a bundle of its own.
+ * The guard itself is always kept: a rescue session that lost its own watchdog
+ * could not be rescued a second time.
  *
- * What goes: everything the operator installed. If one of those was the cause,
- * the resurrection session is clean by construction. If attribution was
- * impossible, this still gets a working conversation, which is the actual goal.
+ * What goes is everything else the operator installed. If one of those was the
+ * cause, the session is clean by construction. If attribution was impossible,
+ * this still gets a working conversation, which is the actual goal.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -43,6 +47,38 @@ export function findFreePort() {
 
 /** Rows the resurrection overlay must never disable. */
 const ALWAYS_KEEP = new Set(['phoenix'])
+
+/**
+ * Reasons a rescue cannot start, in words an operator can act on.
+ *
+ * These are returned as machine codes and were being shown verbatim — an
+ * English identifier is not an explanation, and the operator is already having
+ * a bad day.
+ */
+const FAILURE_TEXT = {
+  'unknown-profile': '不知道当前是哪个 profile，所以无法原样复用它。请在命令行重开 DSH。',
+  'desktop-profile-is-app-managed':
+    '桌面版的 profile 由应用自己管理，不死鸟没法替它另开一个安全模式窗口。请先关掉 DSH，用命令行方式启动一次 web 界面再进复活模式；或者直接在设置里停用可疑插件。',
+  'electron-main-process': '当前进程是桌面应用的主进程，不能从这里重启。请手动关闭并重新打开 DSH。',
+  'not-prepared': '还没准备好复活所需的排查信息，请先让故障复现一次。',
+  'no-script': '无法确定启动参数，请手动重开 DSH。',
+}
+
+/**
+ * Turn a rescue failure code into operator-facing text.
+ * Unknown codes fall through unchanged rather than being hidden.
+ */
+export function describeRescueFailure(reason) {
+  if (typeof reason !== 'string' || reason.length === 0) return '无法进入复活模式。请手动重开 DSH。'
+  if (Object.hasOwn(FAILURE_TEXT, reason)) return FAILURE_TEXT[reason]
+  if (reason.startsWith('could not find a free port')) {
+    return '找不到可用端口，无法另开会话。请手动重开 DSH 后重试。'
+  }
+  if (reason.startsWith('could not write the overlay') || reason.startsWith('could not start')) {
+    return `启动复活会话失败：${reason}`
+  }
+  return reason
+}
 
 function isOfficial(name) {
   return typeof name === 'string' && name.startsWith('@deepseek-ai/')
@@ -75,9 +111,11 @@ export function buildResurrectionOverlay(rows) {
   if (suspects.length === 0) return undefined
 
   const lines = [
-    '# dsh-phoenix resurrection mode',
+    '# dsh-phoenix resurrection mode — this file is temporary',
+    '# It is passed to one process as --patch and is never installed into the',
+    '# profile or the home patch layer, so the next normal start ignores it.',
     '# Keeps every official row (and therefore every provider) and disables the',
-    '# rows the operator installed, so the next session starts clean.',
+    '# rows the operator installed.',
   ]
   for (const row of suspects) {
     lines.push(`- id: ${JSON.stringify(row.id)}`)

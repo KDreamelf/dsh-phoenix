@@ -64,14 +64,14 @@ export function renderCrashPage(report) {
 
   const decideNote = canAct
     ? '选择后先写入隔离，再重载页面——直接重载会重复同样的崩溃。'
-    : '这次故障无法归因到具体插件，所以不会自动禁用任何东西。你可以先重启试试，或者进入复活模式——它会保留你的模型配置，另开一个只加载官方组件的 DSH。'
+    : '第一步「查出是谁崩的」这次没成功：崩溃发生在栈里没有插件信息的地方。不死鸟不会乱猜，也不会顺手动任何一个插件。先点「再试一次」排除偶发；仍然崩就进复活模式——它相当于系统的安全模式：只这一次启动不加载第三方插件，你配的模型供应商一个字节都不碰，不死鸟自己也不停，所以新会话里 AI 是活的。它是临时的，关掉重开就回到正常启动。进去以后，把上面这段错误原样丢给 AI，让它把凶手反查出来。'
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DSH 崩溃恢复 — ${escapeHtml(title)}</title>
+<title>${canAct ? `DSH 崩溃恢复 — ${escapeHtml(title)}` : 'DSH 已停止运行 — 不死鸟'}</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -119,9 +119,13 @@ export function renderCrashPage(report) {
     <div class="head">
       ${iconMarkup}
       <div class="titles">
-        <h1>${canAct ? `${escapeHtml(title)} 让 DSH 无法继续` : 'DSH 已停止运行'}</h1>
+        <h1>${canAct ? `${escapeHtml(title)} 让 DSH 无法继续` : 'DSH 已停止运行（不死鸟接管）'}</h1>
         <p class="pkg">${canAct ? escapeHtml(pkg ?? '') : '没能定位到是哪个插件出的问题'}</p>
-        <p class="desc">${canAct ? escapeHtml(description) : '下面是完整的错误信息，可以复制下来交给 AI 分析。'}</p>
+        <p class="desc">${
+          canAct
+            ? escapeHtml(description)
+            : '它本来是去查这个的：从崩溃现场反查是哪一行插件。这次栈里没有插件信息，所以它把这件事交给 AI——下面是原始错误，一个字没改。'
+        }</p>
       </div>
     </div>
     <div class="body">
@@ -141,7 +145,7 @@ export function renderCrashPage(report) {
       <button type="button" data-choice="disable">停职</button>
       <button type="button" class="danger" data-choice="remove">开除</button>`
           : `<button type="button" data-choice="retry">再试一次</button>
-      <button type="button" class="primary" data-choice="rescue">进入复活模式</button>`
+      <button type="button" class="primary" data-choice="rescue">进入复活模式（让 AI 查）</button>`
       }
     </div>
   </div>

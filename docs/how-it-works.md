@@ -63,6 +63,27 @@ home 层覆盖 profile 层，所以只加一行 `disabled: true` 就够，而 pr
 
 判据细节：`ELECTRON_RUN_AS_NODE=1` 时那个进程就是普通 Node（argv[1] 是脚本），**可以**被替换；只有真正的 Electron 主进程（`process.versions.electron` 存在且不在 as-node 模式）才拒绝。
 
+## 复活模式 = 安全模式
+
+归因失败时，崩溃页给的不是「禁用所有插件」，而是**一次性的安全模式**：
+
+```
+dsh --profile <你的> --patch <logs/crash-guard/resurrection.patch.yml> --port <空闲端口>
+```
+
+那条 overlay 只做一件事：把 `--patch` 能看见的非官方行 `disabled: true`。四个性质：
+
+| 性质 | 靠什么保证 |
+|---|---|
+| **只这一次** | overlay 写在 `$DSH_HOME/logs/crash-guard/` 下，只能通过 `--patch` 进入那一个进程；profile 层和 home 层一个字节都不写。关掉重开就是正常启动 |
+| **供应商不动** | provider 配置是官方行（`llm-pi-ai` / `llm-deepseek` / `agent-default-model`）的 `config` 字段，而那些行在 `keepRow` 里无条件保留。所以新会话里 AI 是活的 |
+| **它自己也留着** | `ALWAYS_KEEP = new Set(['phoenix'])`。丢了监护仪的安全模式，第二次出事没人救 |
+| **插件自建的供应商会消失** | 那是插件退场的连带结果，不是本插件删除的；且只可能发生在该插件被停用之后 |
+
+判据是**行的归属**，不是供应商的身份。你在设置里配的「幻日模型」「闲鱼」这类第三方接口，全都写在官方行的 `config` 里 —— **身份是第三方的，位置是官方的**，所以按行归属判定天然保住它们。这也是为什么不需要一张"供应商豁免名单"：名单会腐坏，结构不会。
+
+桌面端没有 `--patch` 入口（`dsh-desktop-host` 把 `patchFiles` 写死成 `[]`），也不能替 Electron 另开窗口，所以那条路径返回 `desktop-profile-is-app-managed`，并由 `describeRescueFailure` 翻成人话。**机器码绝不给操作员看**：它既不是诊断，也不是出路。
+
 ## 「开除」为什么不立刻执行
 
 真正能干净卸载的入口只有一个：

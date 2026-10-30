@@ -42,6 +42,25 @@ function isFatal(error) {
   return FATAL.some((signature) => haystack.includes(signature))
 }
 
+/**
+ * What the rescue button actually does, in the operator's terms.
+ *
+ * Safe mode is the analogy that carries the two facts worth knowing: it lasts
+ * for one start only, and it does not cost you your setup. Saying "it disables
+ * your third-party plugins" is technically true and reads like a threat — the
+ * provider configuration lives in official rows and is not touched, and the
+ * guard keeps itself so a second rescue is still possible.
+ */
+const RENDER_HINT =
+  '页面渲染出错，DSH 进程仍然存活。先刷新重试；还崩就进复活模式——相当于安全模式：' +
+  '只这一次启动不加载第三方插件，你配的模型供应商不动，不死鸟自己也留着。' +
+  '它是临时的，关掉重开就回到正常启动。'
+
+const SESSION_HINT =
+  '新建会话反复失败，说明 DSH 已经不能对话了。先重试；还不行就进复活模式——相当于安全模式：' +
+  '只这一次启动不加载第三方插件，你配的模型供应商不动，不死鸟自己也留着。' +
+  '进去以后把上面这段报错丢给 AI，让它查原因。'
+
 function summarize(error) {
   if (error === undefined || error === null) return '未知错误'
   const name = typeof error.name === 'string' ? error.name : 'Error'
@@ -235,7 +254,7 @@ window.__ModuleLoader__.load({
               if (!response.ok) {
                 return {
                   ok: false,
-                  message: `宿主拒绝了请求（HTTP ${String(response.status)}）。桌面端无法直接调用此接口，请在命令行运行：dsh-phoenix rescue`,
+                  message: `宿主没有启动复活会话（HTTP ${String(response.status)}）。请手动关掉 DSH 再重新打开；如果还是坏，就在设置里停用最近装的那个插件。`,
                 }
               }
               return await response.json()
@@ -250,7 +269,7 @@ window.__ModuleLoader__.load({
             present(
               '界面已崩溃（不死鸟接管）',
               `${summarize(error)}\n\n${error?.stack ?? ''}`.trim(),
-              '页面渲染出错，DSH 进程仍然存活。你可以先刷新重试，或者进入复活模式——它会保留你的模型配置，只停用你装的第三方插件。',
+              RENDER_HINT,
             )
           })
         }
@@ -262,7 +281,7 @@ window.__ModuleLoader__.load({
             present(
               '界面已崩溃（不死鸟接管）',
               `${summarize(reason)}\n\n${reason?.stack ?? ''}`.trim(),
-              '页面渲染出错，DSH 进程仍然存活。你可以先刷新重试，或者进入复活模式——它会保留你的模型配置，只停用你装的第三方插件。',
+              RENDER_HINT,
             )
           })
         }
@@ -276,11 +295,7 @@ window.__ModuleLoader__.load({
           // text it recorded; nothing here classifies messages.
           safe(() => {
             const dispose = ctx.remote?.$on?.('api-session/error', (_sessionId, message) => {
-              present(
-                'DSH 无法开始对话（不死鸟接管）',
-                String(message ?? '(空错误)'),
-                '新建会话反复失败。你可以先重试，或者进入复活模式——保留你的模型配置，只停用第三方插件。',
-              )
+              present('DSH 无法开始对话（不死鸟接管）', String(message ?? '(空错误)'), SESSION_HINT)
             })
             if (typeof dispose === 'function') ctx.effect(() => dispose)
           })
