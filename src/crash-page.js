@@ -21,8 +21,9 @@ export const STATUS_ROUTE = '/phoenix/status'
 export const CHOICE_RETRY = 'retry'
 export const CHOICE_DISABLE = 'disable'
 export const CHOICE_REMOVE = 'remove'
+export const CHOICE_RESCUE = 'rescue'
 
-const CHOICES = new Set([CHOICE_RETRY, CHOICE_DISABLE, CHOICE_REMOVE])
+const CHOICES = new Set([CHOICE_RETRY, CHOICE_DISABLE, CHOICE_REMOVE, CHOICE_RESCUE])
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -63,7 +64,7 @@ export function renderCrashPage(report) {
 
   const decideNote = canAct
     ? '选择后先写入隔离，再重载页面——直接重载会重复同样的崩溃。'
-    : '这次故障无法归因到具体插件，只能重启。'
+    : '这次故障无法归因到具体插件，所以不会自动禁用任何东西。你可以先重启试试，或者进入复活模式——它会保留你的模型配置，另开一个只加载官方组件的 DSH。'
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -118,9 +119,9 @@ export function renderCrashPage(report) {
     <div class="head">
       ${iconMarkup}
       <div class="titles">
-        <h1>${escapeHtml(title)} 让 DSH 无法继续</h1>
-        <p class="pkg">${escapeHtml(pkg ?? '未归因')}</p>
-        <p class="desc">${escapeHtml(description)}</p>
+        <h1>${canAct ? `${escapeHtml(title)} 让 DSH 无法继续` : 'DSH 已停止运行'}</h1>
+        <p class="pkg">${canAct ? escapeHtml(pkg ?? '') : '没能定位到是哪个插件出的问题'}</p>
+        <p class="desc">${canAct ? escapeHtml(description) : '下面是完整的错误信息，可以复制下来交给 AI 分析。'}</p>
       </div>
     </div>
     <div class="body">
@@ -134,16 +135,20 @@ export function renderCrashPage(report) {
     </div>
     <div class="foot">
       <span id="status"></span>
-      <button type="button" class="primary" data-choice="retry">给个机会</button>
-      <button type="button" data-choice="disable" ${canAct ? '' : 'disabled'}>停职</button>
-      <button type="button" class="danger" data-choice="remove" ${canAct ? '' : 'disabled'}>开除</button>
+      ${
+        canAct
+          ? `<button type="button" class="primary" data-choice="retry">给个机会</button>
+      <button type="button" data-choice="disable">停职</button>
+      <button type="button" class="danger" data-choice="remove">开除</button>`
+          : `<button type="button" data-choice="retry">再试一次</button>
+      <button type="button" class="primary" data-choice="rescue">进入复活模式</button>`
+      }
     </div>
   </div>
 <script>
 (function () {
   var status = document.getElementById('status');
   var buttons = document.querySelectorAll('button[data-choice]');
-  var labels = { retry: '给个机会', disable: '停职', remove: '开除' };
   var busy = false;
 
   function setBusy(on, text) {
@@ -167,7 +172,13 @@ export function renderCrashPage(report) {
       });
       var payload = await response.json().catch(function () { return {}; });
       if (!response.ok || !payload.ok) {
-        setBusy(false, payload.error || ('请求失败：' + response.status));
+        setBusy(false, payload.error || payload.message || ('请求失败：' + response.status));
+        return;
+      }
+      // A rescue session lives at a different URL; the others restart in place.
+      if (typeof payload.url === 'string' && payload.url.length > 0) {
+        status.textContent = payload.message || '复活会话已就绪，正在打开…';
+        setTimeout(function () { location.assign(payload.url); }, 400);
         return;
       }
       status.textContent = payload.message || '已完成，正在重载…';

@@ -143,7 +143,31 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
 
   if (url.pathname === CRASH_ROUTE && req.method === 'GET') {
-    sendHtml(res, renderCrashPage(report))
+    // `?variant=unattributable` shows the branch where no plugin could be
+    // named: nothing to disable, so the page offers retry or a rescue session.
+    const variant = url.searchParams.get('variant')
+    const shown =
+      variant === 'unattributable'
+        ? {
+            kind: 'uncaughtException',
+            package: null,
+            title: undefined,
+            description: undefined,
+            packageDir: undefined,
+            icon: null,
+            rowIds: [],
+            message: "TypeError: undefined is not an object (evaluating 'win.ctx.foo')",
+            stack: [
+              "TypeError: undefined is not an object (evaluating 'win.ctx.foo')",
+              '    at init (app://dsh/main.js:1:1)',
+              '    (no package frame in this stack)',
+            ].join('\n'),
+            decision: 'logged',
+            reason: 'no-package-in-stack',
+            alreadyQuarantined: false,
+          }
+        : report
+    sendHtml(res, renderCrashPage(shown))
     return
   }
 

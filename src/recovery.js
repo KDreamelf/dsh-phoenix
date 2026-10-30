@@ -25,7 +25,17 @@ import { hostname } from 'node:os'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { CRASH_ROUTE, DECIDE_ROUTE, STATUS_ROUTE, CHOICE_DISABLE, CHOICE_REMOVE, CHOICE_RETRY, readChoice, renderCrashPage } from './crash-page.js'
+import {
+  CRASH_ROUTE,
+  DECIDE_ROUTE,
+  STATUS_ROUTE,
+  CHOICE_DISABLE,
+  CHOICE_REMOVE,
+  CHOICE_RESCUE,
+  CHOICE_RETRY,
+  readChoice,
+  renderCrashPage,
+} from './crash-page.js'
 import { readQuarantined, writeQuarantine } from './quarantine.js'
 import { spawnReplacement } from './self-restart.js'
 
@@ -146,8 +156,28 @@ export function beginRecovery(options) {
     state.disposers = []
   }
 
-  /** Apply the operator's choice, then replace the process and exit. */
-  const apply = (choice) => {
+  /**
+   * Apply the operator's choice.
+   *
+   * Three outcomes, matching the three situations:
+   *   disable / remove — we know which row broke, quarantine it, restart
+   *   retry            — nothing to change, restart as-is
+   *   rescue           — we cannot attribute it, so start a clean session
+   *                      (official rows only, providers kept) and send the
+   *                      operator there instead of retrying a known-broken boot
+   */
+  const apply = async (choice) => {
+    if (choice === CHOICE_RESCUE) {
+      if (typeof options.launchRescue !== 'function') {
+        return { ok: false, error: '复活模式不可用（宿主未提供启动入口）' }
+      }
+      const result = await options.launchRescue()
+      if (result?.ok !== true) {
+        return { ok: false, error: result?.reason ?? result?.message ?? '无法启动复活会话' }
+      }
+      return { ok: true, url: result.url, message: '复活会话已就绪，正在打开…' }
+    }
+
     let message = ''
     if (choice === CHOICE_DISABLE || choice === CHOICE_REMOVE) {
       const ids = Array.isArray(report.rowIds) ? report.rowIds : []
@@ -193,10 +223,10 @@ export function beginRecovery(options) {
    * carrier: applying a quarantine is independent of being able to show a page,
    * and the caller may have its own way to ask.
    */
-  const settle = (choice) => {
+  const settle = async (choice) => {
     if (state.decided) return { ok: false, error: 'already decided' }
     state.decided = true
-    return apply(choice)
+    return await apply(choice)
   }
 
   const webserver = (() => {
@@ -269,7 +299,7 @@ export function beginRecovery(options) {
             return
           }
           state.decided = true
-          const result = apply(choice)
+          const result = await apply(choice)
           sendJson(res, result.ok ? 200 : 500, result)
         },
       }),

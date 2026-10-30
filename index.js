@@ -142,7 +142,21 @@ export function apply(ctx, rawConfig) {
 
     let opened
     try {
-      opened = beginRecovery({ ctx, home, report })
+      opened = beginRecovery({
+        ctx,
+        home,
+        report,
+        // The crash page offers rescue only when attribution failed, because
+        // disabling a known culprit is the better fix. Launching is the same
+        // path the error dialog uses.
+        launchRescue: async () =>
+          await spawnResurrectionSession({
+            ctx,
+            home,
+            profile: process.env.DSH_PROFILE,
+            rows: liveRows(ctx),
+          }),
+      })
     } catch (error) {
       recovering = false
       notify(`could not open the recovery page (${describe(error).message}); falling back to exit`)

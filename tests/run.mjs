@@ -305,15 +305,20 @@ await test('crash page: escapes hostile field values', () => {
 
 await test('crash page: unattributable faults disable the acting buttons', () => {
   const html = crashPage.renderCrashPage({ ...sampleReport, package: null, rowIds: [] })
-  assert.ok(/data-choice="disable" disabled/.test(html), 'disable must be disabled')
-  assert.ok(/data-choice="remove" disabled/.test(html), 'remove must be disabled')
-  assert.ok(/data-choice="retry"(?! disabled)/.test(html), 'retry must stay enabled')
+  // Unattributable: no culprit to disable, so the page offers the two options
+  // that still make sense — retry, or a clean rescue session.
+  assert.ok(!html.includes('data-choice="disable"'), 'disable must not be offered')
+  assert.ok(!html.includes('data-choice="remove"'), 'remove must not be offered')
+  assert.ok(html.includes('data-choice="retry"'), 'retry must be offered')
+  assert.ok(html.includes('data-choice="rescue"'), 'rescue must be offered')
+  assert.ok(html.includes('复活模式'), 'rescue button must be labeled in Chinese')
 })
 
-await test('crash page: readChoice accepts only the three known answers', () => {
+await test('crash page: readChoice accepts only the known answers', () => {
   assert.equal(crashPage.readChoice('{"choice":"retry"}'), 'retry')
   assert.equal(crashPage.readChoice('{"choice":"disable"}'), 'disable')
   assert.equal(crashPage.readChoice('{"choice":"remove"}'), 'remove')
+  assert.equal(crashPage.readChoice('{"choice":"rescue"}'), 'rescue')
   assert.equal(crashPage.readChoice('{"choice":"nuke"}'), undefined)
   assert.equal(crashPage.readChoice('not json'), undefined)
   assert.equal(crashPage.readChoice(''), undefined)
@@ -398,7 +403,7 @@ await test('recovery: disable writes quarantine before restarting', async () => 
       },
     })
     // No webserver: settle is still the code path under test for apply().
-    const result = controller.settle('disable')
+    const result = await controller.settle('disable')
     assert.equal(result.ok, true, JSON.stringify(result))
     const quarantine = await import('../src/quarantine.js')
     assert.deepEqual(quarantine.readQuarantined(home), ['broken-plugin'], 'quarantine not written')
@@ -421,7 +426,7 @@ await test('recovery: remove queues an uninstall for the next clean start', asyn
       exit: () => {},
       restart: () => ({ ok: true, pid: 1 }),
     })
-    const result = controller.settle('remove')
+    const result = await controller.settle('remove')
     assert.equal(result.ok, true)
     const pending = recovery.readPendingRemovals(home)
     assert.equal(pending.length, 1)
