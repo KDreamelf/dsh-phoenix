@@ -1,10 +1,29 @@
 {
   "name": "dsh-phoenix",
   "version": "0.1.0",
-  "private": true,
+  "description": "不死鸟 — 终极兜底：DSH 崩溃时拦住、说清是哪个插件、只动出问题的那个，重启后接着用。",
   "type": "module",
-  "description": "Keep DSH alive through plugin faults: contain the crash, quarantine only the failing row, leave providers untouched.",
   "license": "MIT",
+  "author": "KDreamelf",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KDreamelf/dsh-phoenix.git"
+  },
+  "homepage": "https://github.com/KDreamelf/dsh-phoenix#readme",
+  "bugs": {
+    "url": "https://github.com/KDreamelf/dsh-phoenix/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "crash-recovery",
+    "crash-guard",
+    "safe-mode",
+    "quarantine",
+    "fallback"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -25,12 +44,18 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "docs/*.md"
   ],
   "scripts": {
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "preview": "node scripts/preview-crash-page.mjs"
   },
   "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

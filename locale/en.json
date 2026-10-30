@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Phoenix",
-    "description": "Keeps DSH running when a plugin throws: attributes the fault, disables only the failing row, and never touches your provider configuration."
+    "title": "不死鸟",
+    "description": "终极兜底：DSH 崩了或卡住时，它拦住崩溃、告诉你哪个插件出的问题，只动那一个，重启后接着用。⚠ 这是防崩兜底插件，不是普通美化或功能插件——不知道它在做什么就别卸载，最起码卸载前先问问懂的人。"
   }
 }
