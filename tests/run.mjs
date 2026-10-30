@@ -470,7 +470,90 @@ await test('self-restart: refuses only a real Electron main process', () => {
   assert.notEqual(asNode.reason, 'electron-main-process')
 })
 
-// ── 5. client rescue, driven through a fake DOM ───────────────────────────────
+// ── 5. removal finalization (the plugin manager contract) ─────────────────────
+const finalize = await import('../src/finalize.js')
+
+await test('removal: a folded failure result is NOT success', () => {
+  // PluginManager.change() never throws for an expected refusal; it folds the
+  // failure into the returned value. Treating "no throw" as success would clear
+  // the queue and report a removal that never happened.
+  const stopProfile = finalize.classifyRemoval({ application: 'failed', error: { code: 'stop-profile' } })
+  assert.equal(stopProfile.ok, false)
+  assert.equal(stopProfile.reason, 'stop-profile')
+  assert.equal(finalize.classifyRemoval({ application: 'failed', error: { code: 'bundle-in-use' } }).ok, false)
+  assert.equal(finalize.classifyRemoval({ application: 'failed' }).ok, false)
+})
+
+await test('removal: applied and restart-required both count as success', () => {
+  assert.equal(finalize.classifyRemoval({ application: 'applied' }).ok, true)
+  assert.equal(finalize.classifyRemoval({ application: 'restart-required' }).ok, true)
+})
+
+await test('removal: cancelled and missing results are failures', () => {
+  assert.equal(finalize.classifyRemoval({ application: 'cancelled' }).ok, false)
+  assert.equal(finalize.classifyRemoval(undefined).reason, 'no-result')
+})
+
+await test('removal: drops successes, keeps failures for the next start', async () => {
+  const home = freshHome('finalize')
+  try {
+    recovery.markPendingRemove(home, { package: 'good-plugin', rowIds: ['good'], profile: 'dev' })
+    recovery.markPendingRemove(home, { package: 'stubborn-plugin', rowIds: ['stub'], profile: 'dev' })
+
+    const recorded = []
+    const ctx = {
+      get: (service) =>
+        service === 'pluginManager'
+          ? {
+              removeBundle: async (name) =>
+                name === 'good-plugin'
+                  ? { application: 'applied' }
+                  : { application: 'failed', error: { code: 'bundle-in-use' } },
+            }
+          : undefined,
+    }
+
+    const outcomes = await finalize.finalizeRemovals({ ctx, home, record: (entry) => recorded.push(entry) })
+    assert.equal(outcomes.length, 2)
+    assert.equal(outcomes.find((item) => item.package === 'good-plugin').ok, true)
+    assert.equal(outcomes.find((item) => item.package === 'stubborn-plugin').ok, false)
+
+    const left = recovery.readPendingRemovals(home)
+    assert.equal(left.length, 1, 'failed entry must stay queued')
+    assert.equal(left[0].package, 'stubborn-plugin')
+    assert.ok(recorded.some((entry) => entry.kind === 'removal-failed' && entry.reason === 'bundle-in-use'))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('removal: refuses to uninstall itself', async () => {
+  const home = freshHome('self-remove')
+  try {
+    recovery.markPendingRemove(home, { package: 'dsh-phoenix', rowIds: ['phoenix'], profile: 'dev' })
+    const ctx = { get: () => ({ removeBundle: async () => ({ application: 'applied' }) }) }
+    const outcomes = await finalize.finalizeRemovals({ ctx, home })
+    assert.equal(outcomes[0].ok, false)
+    assert.equal(outcomes[0].reason, 'refuses-to-remove-itself')
+    assert.equal(recovery.readPendingRemovals(home).length, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('removal: without a plugin manager nothing is deleted', async () => {
+  const home = freshHome('no-manager')
+  try {
+    recovery.markPendingRemove(home, { package: 'some-plugin', rowIds: ['some'], profile: 'dev' })
+    const outcomes = await finalize.finalizeRemovals({ ctx: { get: () => undefined }, home })
+    assert.equal(outcomes[0].skipped, true)
+    assert.equal(recovery.readPendingRemovals(home).length, 1, 'queue must be untouched')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ── 6. client rescue, driven through a fake DOM ───────────────────────────────
 await test('client: fatal signature draws one overlay, non-fatal draws none', async () => {
   const appended = []
   const makeElement = (tag) => {

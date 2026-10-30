@@ -69,21 +69,44 @@ DSH 不给工具设墙上时钟超时是有意的：**一个跑三小时的 carg
 | 没有任何 HTTP 服务在跑 | 崩溃页没地方挂 | CLI；或先隔离再手动重开 |
 | 会话卡死（工具不理取消） | 这是受伤，不是死亡 | 重启 |
 
-**关于「开除」**：崩溃态下**不会**立刻删包。那次崩溃可能已经把进程留在不可信状态，此时跑 pnpm 卸载是在摇晃的地基上施工。所以「开除」= 先隔离（保证下次能起来）+ 写一条待卸载记录，真正的卸载在下次干净启动后由 CLI 完成。这样最坏情况也只是"插件被禁用但还在硬盘上"，绝不会到"包删了一半、profile 起不来"。
+**关于「开除」**：崩溃态下**不会**立刻删包，而且这跟 DSH 自己的设计一致。
+
+真正能干净卸载的入口只有一个：
+
+```js
+ctx.get('pluginManager').removeBundle(name)
+```
+
+它是 `@Remote` 装饰的正式服务方法，**插件管理页面上的「卸载」按钮调的就是它**（`dsh-client-ui-plugin-manager/lib/client.js:1174`），`plugin_manager` 工具也是同一个。它按正确顺序做完整套：取消选中 → reload → 确认没有活着的 fiber 仍占用它贡献的行 → pnpm remove → 发布并 reload。拒绝时给出具名原因：
+
+| 失败码 | 含义 |
+|---|---|
+| `not-removable` | 这个 bundle 不能从当前 profile 移除 |
+| `stop-profile` | 没有 HMR 且它正在运行，必须先停 profile |
+| `bundle-in-use` | 仍有活着的 fiber 占用它贡献的行 |
+
+**`dsh plugin remove` 不是这个。** 那条命令只是把参数转发给 pnpm（`dsh/lib/plugin-BiveYA7h.js:63-93`），它会删掉文件但**不会**把 bundle 从 `dsh.profile.bundles` 里摘掉，于是留下一个选中了已不存在 bundle 的坏 profile。
+
+所以「开除」= 先隔离（保证下次一定起得来）+ 记录待卸载，真正的卸载由插件在**下次干净启动后**自动执行：那时进程健康、肇事行已禁用、HMR 就绪，正好满足 `removeBundle` 的全部前提。失败会留在队列里等下次重试，并记下具体原因。
+
+还有一个容易踩的细节：`removeBundle` **不会抛异常**。`PluginManager.change()` 把预期失败折进返回值（`application: 'failed'` + `error.code`）。只包 `try/catch` 会把每次拒绝都当成成功——清空队列、谎报"已移除"。本插件按返回值判定，并由测试锁住。
 
 ## CLI
 
 启动期崩溃时，插件救不了自己，用 CLI：
 
 ```bash
-dsh-phoenix status          # 隔离了哪些行、多少条记录
+dsh-phoenix status          # 隔离了哪些行、待卸载队列、是否支持自动重启
 dsh-phoenix doctor          # 归因最近一次失败，打印最小覆盖补丁
 dsh-phoenix restore <rowId> # 解除某一行
 dsh-phoenix restore --all   # 全部解除
 dsh-phoenix logs [n]        # 最近的被拦截失败
+dsh-phoenix finalize        # 查看待卸载队列（实际卸载在下次启动自动执行）
 dsh-phoenix prune           # 清理 30 天前的日志
 dsh-phoenix path            # 打印 patch 与日志位置
 ```
+
+`finalize` 只报告，不执行——原因见上面「关于开除」。队列由插件在下次启动后自行清空。
 
 `doctor` 会给出这样一个最小覆盖补丁，**只绕过肇事行**启动：
 
@@ -123,7 +146,7 @@ dsh --profile <name> --patch ./overlay.yml
 node tests/run.mjs
 ```
 
-25 项，覆盖归因（含 `link:` 路径、前缀误匹配、恶意 `toString`、cause 环）、隔离写入（provider 保留、块幂等、空文件回归、磁盘往返）、崩溃页（HTML 转义、三按钮、无法归因时禁用动作按钮、选择校验）、恢复流程（无 webserver 降级、三路由注册与卸载、停职先写隔离再换进程、开除排队卸载）、元数据（从栈帧定位包目录、图标内联）、自重启（只拒绝真正的 Electron 主进程）、插件行为（只隔离肇事者、官方包受保护、卸载还原宿主 handler）、客户端救援（致命签名才绘制、幂等、卸载清理）。
+33 项，覆盖归因（含 `link:` 路径、前缀误匹配、恶意 `toString`、cause 环）、隔离写入（provider 保留、块幂等、空文件回归、磁盘往返）、崩溃页（HTML 转义、三按钮、无法归因时禁用动作按钮、选择校验）、恢复流程（无 webserver 降级、三路由注册与卸载、停职先写隔离再换进程、开除排队卸载）、元数据（从栈帧定位包目录、图标内联）、自重启（只拒绝真正的 Electron 主进程）、**卸载**（折叠失败不算成功、`applied`/`restart-required` 都算成功、失败留队、拒绝卸载自己、无 pluginManager 时不删任何东西）、插件行为（只隔离肇事者、官方包受保护、卸载还原宿主 handler）、客户端救援（致命签名才绘制、幂等、卸载清理）。
 
 有一条实测记录在 `tests/live-verify.md`：崩溃 → 崩溃页 200 → 点停职 → 隔离落盘 → 新进程起来（不同 PID，创建时间对得上）→ 不再崩溃。
 

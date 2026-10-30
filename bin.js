@@ -10,7 +10,6 @@
  */
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
 
 import { composePatchText, homePatchPath, readQuarantined } from './src/quarantine.js'
 import { logDirectory, logPath, pruneRecords, readRecords } from './src/log.js'
@@ -161,57 +160,43 @@ function commandPrune(home) {
 }
 
 /**
- * Execute queued uninstalls through DSH's own plugin manager path.
+ * Show the removal queue.
  *
- * Deliberately a separate, explicit command: the crash handler only records an
- * intent, because removing a package while the process that runs it is
- * unhealthy is how a profile ends up half-broken. This runs in a clean process,
- * against a profile whose culprit row is already disabled.
+ * This does NOT uninstall anything, and that is deliberate. The only correct
+ * entry point is `pluginManager.removeBundle`, a service that lives inside a
+ * running host: it deselects the bundle, reloads, refuses while a live fiber
+ * still owns one of its rows, runs pnpm, then republishes. A CLI process has no
+ * such service — and `dsh plugin remove` is not a substitute, because it
+ * forwards straight to pnpm and leaves the bundle selected in
+ * `dsh.profile.bundles`, producing a profile that selects a bundle whose files
+ * are gone.
+ *
+ * So the queue is drained by the plugin itself, right after a clean start.
  */
-function commandFinalize(home, args) {
+function commandFinalize(home) {
   const pending = readPendingRemovals(home)
   if (pending.length === 0) {
-    out('Nothing queued for removal.')
+    out('Removal queue is empty.')
     return 0
   }
-  const profile = args[0] ?? process.env.DSH_PROFILE
-  const doIt = args.includes('--yes')
-  out(`queued: ${pending.map((item) => item.package).join(', ')}`)
-  if (profile === undefined) {
-    err('No profile given. Pass one explicitly: dsh-phoenix finalize <profile> [--yes]')
-    err('(The crash handler records the profile it saw, but never assumes.)')
-    return 1
-  }
-  out(`profile: ${profile}`)
-  if (!doIt) {
-    out()
-    out('This will run, for each package:')
-    out(`  dsh plugin --profile ${profile} remove <package>`)
-    out()
-    out('Re-run with --yes to execute.')
-    return 0
-  }
-  let failures = 0
+  out('Queued for removal:')
   for (const item of pending) {
-    if (typeof item.package !== 'string' || item.package.length === 0) continue
-    out(`removing ${item.package} …`)
-    const result = spawnSync('dsh', ['plugin', '--profile', profile, 'remove', item.package], {
-      stdio: 'inherit',
-      shell: process.platform === 'win32',
-    })
-    if (result.status !== 0) {
-      err(`remove failed for ${item.package} (exit ${String(result.status ?? 'signal')})`)
-      failures += 1
-    } else {
-      out(`removed ${item.package}`)
-    }
+    const profile = item.profile === null || item.profile === undefined ? '' : `  (profile: ${item.profile})`
+    out(`  ${item.package}${profile}`)
+    if (item.requestedAt !== undefined) out(`    requested ${item.requestedAt}`)
   }
-  if (failures === 0) {
-    out()
-    out('All queued removals finished. The queue file is left in place for audit;')
-    out('delete it manually once you are satisfied.')
-  }
-  return failures === 0 ? 0 : 1
+  out()
+  out('These run automatically on the next clean start: dsh-phoenix calls')
+  out('pluginManager.removeBundle() after activation, once the profile is healthy')
+  out('and the culprit row is already disabled.')
+  out()
+  out('Why not here: a bundle removal needs the running host (deselect, reload,')
+  out('verify no live fiber owns its rows, pnpm remove, republish). A CLI process')
+  out('cannot do that, and `dsh plugin remove` only forwards to pnpm — it would')
+  out('delete the files but leave the bundle selected.')
+  out()
+  out('To drain it now: start the profile normally, then run `dsh-phoenix status`.')
+  return 0
 }
 
 function commandPath(home) {
@@ -236,7 +221,7 @@ async function main(argv) {
     case 'prune':
       return commandPrune(home)
     case 'finalize':
-      return commandFinalize(home, args)
+      return commandFinalize(home)
     case 'path':
       return commandPath(home)
     case '--version':
@@ -256,7 +241,7 @@ async function main(argv) {
           '  restore --all       un-quarantine everything',
           '  logs [n]            recent contained failures',
           '  prune               drop records older than 30 days',
-          '  finalize <profile>  run queued removals (add --yes to execute)',
+          '  finalize            show the removal queue and where it drains',
           '  path                print the patch and log locations',
           '',
           `home: ${home}`,

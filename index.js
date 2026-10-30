@@ -28,6 +28,7 @@ import { localDay, logPath, writeRecord } from './src/log.js'
 import { beginRecovery, crashPageUrl } from './src/recovery.js'
 import { describePackage } from './src/meta.js'
 import { restartCommand } from './src/self-restart.js'
+import { finalizeRemovals } from './src/finalize.js'
 
 /** The web carrier, when this composition has one. The service key is `webServer`. */
 function safeWebserver(ctx) {
@@ -308,6 +309,34 @@ export function apply(ctx, rawConfig) {
   // the background-job system. Bounding it here would kill legitimate work to
   // rescue a case that a restart already fixes. A wedged session is an injury,
   // not death.
+
+  // Deferred removals: "remove" on the crash page only queues an uninstall,
+  // because removing a bundle whose process just threw is exactly what the
+  // plugin manager's `stop-profile` and `bundle-in-use` guards exist to prevent.
+  // This is the clean start it was waiting for: the culprit row is disabled by
+  // the home patch, the process is healthy, and HMR is available. Run it after
+  // activation settles so it cannot disturb this plugin's own wiring.
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      finalizeRemovals({
+        ctx,
+        home,
+        record: (entry) => record(entry),
+      })
+        .then((outcomes) => {
+          for (const outcome of outcomes) {
+            if (outcome.skipped === true) continue
+            notify(
+              outcome.ok
+                ? `removed queued plugin ${outcome.package}`
+                : `could not remove ${outcome.package} (${outcome.reason}); kept in the queue`,
+            )
+          }
+        })
+        .catch((error) => notify(`removal queue failed: ${describe(error).message}`))
+    }, 0)
+    return () => clearTimeout(timer)
+  })
 }
 
 /** Exposed for tests and the CLI; the module is otherwise a Cordis plugin. */
