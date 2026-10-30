@@ -159,9 +159,23 @@ rm -rf ~/.dsh/logs/crash-guard
 
 | 项 | 原因 |
 |---|---|
-| Electron 桌面端行为 | `desktop` profile 被 Electron 独占，CLI 不能操作；所有实测都在独立 profile 上 |
+| Electron 桌面端的复活模式 | `desktop` profile 由 Electron 独占，`dsh-desktop-host` 把 `patchFiles` 写死成 `[]`，没有 `--patch` 入口。桌面端会如实返回 `desktop-profile-is-app-managed`（已翻成中文），并让你手动重开 |
 | 「开除」真正执行卸载 | 只验证到「记录待卸载」，`finalizeRemovals` 逻辑由单元测试覆盖，未在真实包上跑过 |
 | 组合层故障（见下） | 尚未实现 |
+
+## 桌面端安装实测
+
+在真实的 `desktop` profile 上装过一次（`plugin_manager install_bundle`，link 到工作树），验证到这三件事：
+
+| 检查点 | 结果 |
+|---|---|
+| 安装回执 | `application: "applied"`，无 warnings |
+| 插件是否真的挂上 | `~/.dsh/logs/crash-guard/2026-10-30.jsonl` 出现 `guard-activated` + `composition-scan healthy` |
+| 宿主路由是否可达 | `GET http://127.0.0.1:<port>/phoenix/rescue` → `200 {"ok":true,"prepared":null}` |
+
+`/phoenix/crash` 与 `/phoenix/status` 返回 404 是**正确**的：那两个路由只在崩溃托管期间注册。
+
+顺带一个只有实测才看得到的事实：`/phoenix/rescue` 没有走 `/api` 那道浏览器信任栅栏，未带 token 的请求也能到达（`/` 是 401，`/phoenix/rescue` 是 200）。它不返回任何数据，最坏情况是一个本地进程替你准备一次复活——但这一层要不要加校验，是个待定项。
 
 ## 已知未覆盖：组合层 / 服务层故障
 
