@@ -392,15 +392,17 @@ export function apply(ctx, rawConfig) {
         ctx,
         prepared: () => monitor.prepared(),
         launch: async () => {
-          const state = monitor.prepared()
-          if (state === undefined) return { ok: false, reason: 'not-prepared' }
-          const result = await spawnResurrectionSession({
+          // The dialog shows on the first error; preparation waits for the
+          // second. A fast click must still work, so prepare on demand — the
+          // click is the consent this plugin always waits for.
+          const state = monitor.prepared() ?? monitor.prepareNow('operator-requested')
+          if (state === undefined) return { ok: false, reason: 'rescue-unavailable' }
+          return await spawnResurrectionSession({
             ctx,
             home,
             profile: state.profile,
             rows: liveRows(ctx),
           })
-          return result
         },
       }),
     )

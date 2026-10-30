@@ -130,6 +130,19 @@ export function createBlockingMonitor(options) {
       return last ?? readRescueState(home)
     },
 
+    /**
+     * Prepare now because the operator asked for it.
+     *
+     * The dialog appears on the FIRST session error, but preparation waits for
+     * the second — so a fast click would otherwise reach an endpoint that has
+     * nothing ready and answer "not prepared", which is a dead button on the one
+     * screen that must not have one. The operator's click is the consent, so
+     * preparing here is not the automatic switch this module refuses to make.
+     */
+    prepareNow(cause) {
+      return prepare(cause ?? 'operator-requested')
+    },
+
     /** Clear the streak (rescue was declined or a session recovered). */
     reset() {
       consecutive = 0

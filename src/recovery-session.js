@@ -60,6 +60,7 @@ const FAILURE_TEXT = {
   'desktop-profile-is-app-managed':
     '桌面版的 profile 由应用自己管理，不死鸟没法替它另开一个安全模式窗口。请先关掉 DSH，用命令行方式启动一次 web 界面再进复活模式；或者直接在设置里停用可疑插件。',
   'electron-main-process': '当前进程是桌面应用的主进程，不能从这里重启。请手动关闭并重新打开 DSH。',
+  'rescue-unavailable': '没能准备好复活所需的排查信息。请手动关掉 DSH 再重新打开。',
   'not-prepared': '还没准备好复活所需的排查信息，请先让故障复现一次。',
   'no-script': '无法确定启动参数，请手动重开 DSH。',
 }

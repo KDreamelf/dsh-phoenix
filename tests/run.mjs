@@ -699,6 +699,80 @@ await test('crash page: the unattributable note is a safe mode, not a threat', (
   assert.ok(!html.includes('所以不会自动禁用任何东西'))
 })
 
+await test('rescue: a refused launch answers in words, never in a machine code', async () => {
+  const routes = new Map()
+  const dispose = recovery.installRescueRoutes({
+    ctx: {
+      get: (service) =>
+        service === 'webServer'
+          ? {
+              register: (route) => {
+                routes.set(route.path, route)
+                return () => routes.delete(route.path)
+              },
+            }
+          : undefined,
+    },
+    prepared: () => ({ profile: 'desktop' }),
+    launch: async () => ({ ok: false, reason: 'desktop-profile-is-app-managed' }),
+  })
+  try {
+    const route = routes.get(recovery.RESCUE_ROUTE)
+    assert.ok(route !== undefined, 'the rescue route must be registered')
+
+    let status
+    let payload
+    const res = {
+      writeHead(code) {
+        status = code
+      },
+      end(chunk) {
+        payload = JSON.parse(String(chunk))
+      },
+    }
+    await route.handler(
+      {
+        method: 'POST',
+        // readBody waits for 'end'; a stub that never emits it would hang the
+        // handler (and the whole suite) rather than fail.
+        on(event, handler) {
+          if (event === 'end') queueMicrotask(() => handler())
+          return this
+        },
+        destroy() {},
+      },
+      res,
+    )
+    assert.equal(status, 500)
+    assert.equal(payload.ok, false)
+    assert.ok(typeof payload.message === 'string' && payload.message.length > 0)
+    assert.ok(!payload.message.includes('desktop-profile-is-app-managed'), 'the code must be translated')
+  } finally {
+    dispose()
+  }
+})
+
+await test('blocking: an operator click prepares the rescue before the threshold', () => {
+  const home = freshHome('blocking-on-demand')
+  try {
+    const monitor = blocking.createBlockingMonitor({
+      ctx: { get: () => ({ entries: () => [] }) },
+      home,
+      profile: 'demo',
+      record: () => {},
+      notify: () => {},
+    })
+    // The dialog appears on the first error; a click at that instant must still
+    // find something to launch.
+    assert.equal(monitor.prepared(), undefined)
+    const state = monitor.prepareNow('operator-requested')
+    assert.ok(state !== undefined, 'the click itself is the consent')
+    assert.equal(monitor.prepared()?.profile, 'demo')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 await test('blocking: threshold is reached by consecutive errors only', () => {
   const home = freshHome('blocking')
   try {

@@ -390,7 +390,12 @@ export function installRescueRoutes(options) {
           }
           await readBody(req)
           const result = await options.launch()
-          sendJson(res, result.ok ? 200 : 500, result)
+          // Translate here, not in the browser: every caller of this endpoint
+          // would otherwise need to know the internal codes, and the dialog is
+          // the one place a machine identifier must never surface.
+          const payload =
+            result?.ok === true ? result : { ...result, message: describeRescueFailure(result?.reason) }
+          sendJson(res, result?.ok === true ? 200 : 500, payload)
         },
       }),
     )
