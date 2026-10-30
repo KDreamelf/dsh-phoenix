@@ -137,6 +137,10 @@ export function apply(ctx, rawConfig) {
       stack: fault.described.stack,
       decision: fault.decision,
       reason: fault.reason,
+      // What attribution already disabled for the next start. The page needs it:
+      // "retry" must undo exactly these, or the button that says "no change"
+      // would keep the plugin off and the operator would see the same fault again.
+      quarantinedIds: fault.quarantinedIds ?? [],
       alreadyQuarantined: quarantined.size > 0,
     }
 

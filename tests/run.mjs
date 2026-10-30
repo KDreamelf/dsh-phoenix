@@ -699,6 +699,59 @@ await test('crash page: the unattributable note is a safe mode, not a threat', (
   assert.ok(!html.includes('所以不会自动禁用任何东西'))
 })
 
+await test('recovery: retry undoes the quarantine attribution already wrote', async () => {
+  // Attribution disables the culprit row BEFORE the page appears, so that every
+  // button leads to a boot that works. That makes "给个机会" the button that
+  // undoes it — if it did nothing, it would silently keep the plugin off and the
+  // operator would meet the same fault on the next start with no explanation.
+  const home = freshHome('retry-undo')
+  try {
+    quarantine.writeQuarantine(home, ['some-other-row', 'broken-plugin'])
+    const controller = recovery.beginRecovery({
+      ctx: { get: () => undefined },
+      home,
+      report: { ...sampleReport, quarantinedIds: ['broken-plugin'] },
+      exit: () => {},
+      restart: () => ({ ok: true, pid: 1 }),
+    })
+    const result = await controller.settle(crashPage.CHOICE_RETRY)
+    assert.equal(result.ok, true)
+    const left = quarantine.readQuarantined(home)
+    assert.deepEqual(left, ['some-other-row'], 'only this fault s row is released')
+    controller.release()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('recovery: disable keeps the row that attribution quarantined', async () => {
+  const home = freshHome('disable-keeps')
+  try {
+    quarantine.writeQuarantine(home, ['broken-plugin'])
+    const controller = recovery.beginRecovery({
+      ctx: { get: () => undefined },
+      home,
+      report: { ...sampleReport, quarantinedIds: ['broken-plugin'] },
+      exit: () => {},
+      restart: () => ({ ok: true, pid: 1 }),
+    })
+    const result = await controller.settle(crashPage.CHOICE_DISABLE)
+    assert.equal(result.ok, true)
+    assert.deepEqual(quarantine.readQuarantined(home), ['broken-plugin'])
+    controller.release()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('crash page: says the row is already disabled, and what each button does', () => {
+  const html = crashPage.renderCrashPage({ ...sampleReport, quarantinedIds: ['broken-plugin'] })
+  // The page must not imply nothing has happened yet.
+  assert.ok(html.includes('已经被停用'), 'must state the row was already disabled')
+  assert.ok(html.includes('恢复它再启动'), 'retry must say it releases the row')
+  assert.ok(html.includes('保持禁用'), 'disable must say it keeps the row off')
+})
+
 await test('rescue: a rescue session refuses to launch another one', async () => {
   // Found by probing a live rescue session: it answered the same POST with a new
   // URL, so one fault could spawn a chain of sessions, each spending tokens and

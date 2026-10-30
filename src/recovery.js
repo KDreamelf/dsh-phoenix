@@ -180,7 +180,29 @@ export function beginRecovery(options) {
     }
 
     let message = ''
-    if (choice === CHOICE_DISABLE || choice === CHOICE_REMOVE) {
+    if (choice === CHOICE_RETRY) {
+      // Attribution already wrote the quarantine before this page appeared, so
+      // "retry" has something to undo. Leaving it in place would mean the button
+      // that says "no change" silently keeps the plugin disabled — the operator
+      // would meet the same fault on the next start with no explanation.
+      const ids = Array.isArray(report.quarantinedIds) ? report.quarantinedIds : []
+      if (ids.length > 0) {
+        const current = new Set(readQuarantined(home))
+        let released = 0
+        for (const id of ids) {
+          if (current.delete(id)) released += 1
+        }
+        try {
+          writeQuarantine(home, [...current])
+          message =
+            released > 0 ? `已恢复：${ids.join(', ')}，正在重启` : '未做改动，正在重启'
+        } catch (error) {
+          return { ok: false, error: `撤销隔离失败：${String(error)}` }
+        }
+      } else {
+        message = '未做改动，正在重启'
+      }
+    } else if (choice === CHOICE_DISABLE || choice === CHOICE_REMOVE) {
       const ids = Array.isArray(report.rowIds) ? report.rowIds : []
       if (ids.length > 0) {
         const current = new Set(readQuarantined(home))
@@ -207,8 +229,6 @@ export function beginRecovery(options) {
           message += `（排队失败：${String(error)}）`
         }
       }
-    } else {
-      message = '未做改动，正在重启'
     }
 
     const spawned = restart()

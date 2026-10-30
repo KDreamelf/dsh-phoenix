@@ -56,14 +56,20 @@ export function renderCrashPage(report) {
   const stack = report.stack ?? ''
   const canAct = pkg !== null && rowIds.length > 0
   const alreadyQuarantined = report.alreadyQuarantined === true
+  const justQuarantined = Array.isArray(report.quarantinedIds) ? report.quarantinedIds : []
 
   const iconMarkup =
     icon === null
       ? `<div class="glyph">${escapeHtml(initials(title, pkg))}</div>`
       : `<img class="glyph" src="${escapeHtml(icon)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'glyph',textContent:${JSON.stringify(initials(title, pkg))}}))">`
 
+  // Be exact about what has already happened. Attribution disables the row before
+  // this page exists, so "给个机会" is not a no-op — it is the button that undoes
+  // that. Saying "nothing has been touched yet" would be a lie the operator can
+  // catch by looking at their next start.
   const decideNote = canAct
-    ? '选择后先写入隔离，再重载页面——直接重载会重复同样的崩溃。'
+    ? `检测到故障时，这一行已经被停用（${justQuarantined.length > 0 ? justQuarantined.join('、') : rowIds.join('、')}），这样无论你选哪个，下一次都起得来。` +
+      '选择后先改写隔离，再重启进程——直接刷新会重复同样的崩溃。'
     : '第一步「查出是谁崩的」这次没成功：崩溃发生在栈里没有插件信息的地方。不死鸟不会乱猜，也不会顺手动任何一个插件。先点「再试一次」排除偶发；仍然崩就进复活模式——它相当于系统的安全模式：只这一次启动不加载第三方插件，你配的模型供应商一个字节都不碰，不死鸟自己也不停，所以新会话里 AI 是活的。它是临时的，关掉重开就回到正常启动。进去以后，把上面这段错误原样丢给 AI，让它把凶手反查出来。'
 
   return `<!DOCTYPE html>
@@ -134,16 +140,16 @@ export function renderCrashPage(report) {
       <div class="label">错误</div>
       <pre>${escapeHtml(message)}${stack.length > 0 ? `\n\n${escapeHtml(stack)}` : ''}</pre>
       <p class="note">${escapeHtml(decideNote)}${
-        alreadyQuarantined ? '（这个插件当前已被隔离。）' : ''
+        alreadyQuarantined && justQuarantined.length === 0 ? '（这个插件此前已被隔离。）' : ''
       }</p>
     </div>
     <div class="foot">
       <span id="status"></span>
       ${
         canAct
-          ? `<button type="button" class="primary" data-choice="retry">给个机会</button>
-      <button type="button" data-choice="disable">停职</button>
-      <button type="button" class="danger" data-choice="remove">开除</button>`
+          ? `<button type="button" class="primary" data-choice="retry">给个机会（恢复它再启动）</button>
+      <button type="button" data-choice="disable">停职（保持禁用）</button>
+      <button type="button" class="danger" data-choice="remove">开除（禁用并卸载）</button>`
           : `<button type="button" data-choice="retry">再试一次</button>
       <button type="button" class="primary" data-choice="rescue">进入复活模式（让 AI 查）</button>`
       }
