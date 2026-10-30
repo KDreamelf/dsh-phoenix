@@ -317,4 +317,72 @@ export function crashPageUrl(webserver) {
   return CRASH_ROUTE
 }
 
+export const RESCUE_ROUTE = '/phoenix/rescue'
+
+/**
+ * Mount the rescue endpoint for the whole life of the session.
+ *
+ * This is not part of the crash hold: it must answer while DSH is running badly,
+ * which is exactly when the error dialog offers it. A browser page can call it;
+ * the Desktop renderer loads over `file://` and cannot, so the dialog there
+ * shows the equivalent command rather than a button that cannot work.
+ *
+ * @param options.ctx - plugin context.
+ * @param options.prepared - returns the prepared rescue state, or undefined.
+ * @param options.launch - starts the rescue session, returns `{ ok, url? }`.
+ * @returns a disposer, or a no-op when there is no carrier.
+ */
+export function installRescueRoutes(options) {
+  const webserver = (() => {
+    try {
+      return options.ctx.get?.('webServer')
+    } catch {
+      return undefined
+    }
+  })()
+  if (webserver === undefined || typeof webserver.register !== 'function') return () => {}
+
+  const disposers = []
+  try {
+    disposers.push(
+      webserver.register({
+        kind: 'exact',
+        path: RESCUE_ROUTE,
+        handler: async (req, res) => {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { ok: true, prepared: options.prepared() ?? null })
+            return
+          }
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            return
+          }
+          await readBody(req)
+          const result = await options.launch()
+          sendJson(res, result.ok ? 200 : 500, result)
+        },
+      }),
+    )
+  } catch (error) {
+    for (const dispose of disposers) {
+      try {
+        dispose()
+      } catch {
+        /* best effort */
+      }
+    }
+    return () => {}
+  }
+
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose()
+      } catch {
+        /* teardown is best effort */
+      }
+    }
+  }
+}
+
 export { hostname }

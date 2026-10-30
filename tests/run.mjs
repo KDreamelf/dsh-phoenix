@@ -553,7 +553,154 @@ await test('removal: without a plugin manager nothing is deleted', async () => {
   }
 })
 
-// ── 6. client rescue, driven through a fake DOM ───────────────────────────────
+// ── 5. composition health ─────────────────────────────────────────────────────
+const health = await import('../src/health.js')
+
+await test('health: a required row that failed makes DSH unusable', () => {
+  const ctx = {
+    get: () => ({
+      entries: () => [
+        { options: { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' }, fiber: { state: 3, _error: new Error('boom') } },
+        { options: { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat' }, fiber: { state: 2 } },
+      ],
+    }),
+  }
+  const result = health.scanComposition(ctx)
+  assert.equal(result.usable, false)
+  assert.equal(result.requiredBroken.length, 1)
+  assert.equal(result.requiredBroken[0].id, 'agent-loop')
+  assert.equal(result.requiredBroken[0].state, 'failed')
+  assert.ok(String(result.requiredBroken[0].error).includes('boom'))
+})
+
+await test('health: a broken optional row degrades but stays usable', () => {
+  const ctx = {
+    get: () => ({
+      entries: () => [
+        { options: { id: 'agent-loop', name: 'x' }, fiber: { state: 2 } },
+        { options: { id: 'optional-thing', name: 'y' }, fiber: { state: 0 } },
+      ],
+    }),
+  }
+  const result = health.scanComposition(ctx)
+  assert.equal(result.usable, true)
+  assert.equal(result.broken.length, 1)
+  assert.equal(result.broken[0].state, 'pending')
+})
+
+await test('health: disabled rows are not reported as broken', () => {
+  const ctx = {
+    get: () => ({
+      entries: () => [
+        { options: { id: 'agent-loop', name: 'x' }, fiber: { state: 2 } },
+        { options: { id: 'off', name: 'y' }, disabled: true, fiber: { state: 0 } },
+      ],
+    }),
+  }
+  assert.equal(health.scanComposition(ctx).broken.length, 0)
+})
+
+await test('health: a throwing disabled expression is itself a fault', () => {
+  const ctx = {
+    get: () => ({
+      entries: () => [
+        {
+          options: { id: 'weird', name: 'z' },
+          get disabled() {
+            throw new Error('!!js blew up')
+          },
+          fiber: { state: 2 },
+        },
+      ],
+    }),
+  }
+  const result = health.scanComposition(ctx)
+  assert.equal(result.rows[0].disabled, false)
+  assert.ok(String(result.rows[0].error).includes('!!js blew up'))
+})
+
+await test('health: summarize names the required rows by state', () => {
+  const summary = health.summarizeComposition({
+    requiredBroken: [{ id: 'webserver', state: 'failed' }],
+    broken: [{ id: 'webserver', state: 'failed' }],
+  })
+  assert.ok(summary.includes('webserver(failed)'))
+})
+
+// ── 6. blocking detection and rescue preparation ──────────────────────────────
+const blocking = await import('../src/blocking.js')
+const recoverySession = await import('../src/recovery-session.js')
+
+await test('rescue: overlay keeps official rows and disables the rest', () => {
+  const rows = [
+    { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' },
+    { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai' },
+    { id: 'include', name: 'cordis:include' },
+    { id: 'phoenix', name: 'dsh-phoenix' },
+    { id: 'community-thing', name: 'dsh-community-thing' },
+    { id: 'linked-thing', name: '@someone/linked-thing' },
+  ]
+  const yaml = recoverySession.buildResurrectionOverlay(rows)
+  assert.ok(yaml.includes('"community-thing"'), 'third-party row must be disabled')
+  assert.ok(yaml.includes('"linked-thing"'), 'scoped third-party row must be disabled')
+  assert.ok(!yaml.includes('"llm-pi-ai"'), 'provider row must survive')
+  assert.ok(!yaml.includes('"include"'), 'builtin must survive')
+  assert.ok(!yaml.includes('"phoenix"'), 'the guard must survive')
+})
+
+await test('rescue: an all-official composition needs no overlay', () => {
+  const yaml = recoverySession.buildResurrectionOverlay([{ id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' }])
+  assert.equal(yaml, undefined)
+})
+
+await test('blocking: threshold is reached by consecutive errors only', () => {
+  const home = freshHome('blocking')
+  try {
+    const records = []
+    const monitor = blocking.createBlockingMonitor({
+      ctx: { get: () => ({ entries: () => [{ options: { id: 'x', name: 'third-party-x' }, fiber: { state: 2 } }] }) },
+      home,
+      profile: 'demo',
+      record: (entry) => records.push(entry),
+      notify: () => {},
+    })
+
+    monitor.onSessionError('s1', 'boom')
+    assert.equal(records.filter((entry) => entry.decision === 'blocking').length, 0, 'one error is not a block')
+    assert.equal(monitor.prepared(), undefined)
+
+    monitor.onSessionError('s2', 'boom')
+    const state = monitor.prepared()
+    assert.ok(state !== undefined, 'second consecutive error must prepare a rescue')
+    assert.equal(state.disabled.includes('x'), true)
+    assert.ok(records.some((entry) => entry.kind === 'rescue-prepared'))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await test('blocking: a working session resets the streak', () => {
+  const home = freshHome('blocking-reset')
+  try {
+    const records = []
+    const monitor = blocking.createBlockingMonitor({
+      ctx: { get: () => ({ entries: () => [] }) },
+      home,
+      profile: 'demo',
+      record: (entry) => records.push(entry),
+      notify: () => {},
+    })
+    monitor.onSessionError('s1', 'boom')
+    monitor.onSessionWorking()
+    monitor.onSessionError('s2', 'boom')
+    assert.equal(records.filter((entry) => entry.decision === 'blocking').length, 0)
+    assert.equal(monitor.prepared(), undefined)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ── 7. client rescue, driven through a fake DOM ───────────────────────────────
 await test('client: fatal signature draws one overlay, non-fatal draws none', async () => {
   const appended = []
   const makeElement = (tag) => {
@@ -606,28 +753,47 @@ await test('client: fatal signature draws one overlay, non-fatal draws none', as
     assert.equal(captured.id, 'dsh-phoenix')
 
     const mod = captured.factory()
+    assert.deepEqual(mod.inject, ['remote'], 'must inject remote to observe session failures')
+
+    // Fake ctx: effect runs the body, remote exposes a subscriber.
+    const sessionHandlers = []
     let cleanup
     mod.apply({
       effect: (fn) => {
-        cleanup = fn()
-        return () => cleanup?.()
+        const dispose = fn()
+        cleanup = () => {
+          if (typeof dispose === 'function') dispose()
+        }
+        return cleanup
+      },
+      remote: {
+        $on: (name, handler) => {
+          if (name === 'api-session/error') sessionHandlers.push(handler)
+          return () => {}
+        },
       },
     })
 
-    // Non-fatal: no overlay.
+    // Non-fatal: no modal.
     listeners.get('error')?.({ error: new Error('a widget broke') })
-    assert.equal(documentStub.getElementById('dsh-phoenix-rescue'), null, 'overlay shown for a benign error')
+    assert.equal(documentStub.getElementById('dsh-phoenix-modal'), null, 'modal shown for a benign error')
 
-    // Fatal: overlay appears.
+    // Fatal: modal appears.
     const fatal = new Error("renderSlot('root') before any 'root' registration")
     fatal.name = 'SlotAssemblyError'
     listeners.get('error')?.({ error: fatal })
-    const overlay = documentStub.getElementById('dsh-phoenix-rescue')
-    assert.ok(overlay, 'overlay missing for a fatal error')
+    const overlay = documentStub.getElementById('dsh-phoenix-modal')
+    assert.ok(overlay, 'modal missing for a fatal error')
+
+    // The original error must survive into the dialog: the operator decides
+    // based on what actually broke, and a rewritten message would be a lie.
+    assert.ok(overlay.children.length > 0, 'modal has no content')
+    const text = JSON.stringify(overlay.children, (key, value) => (key === 'children' ? value : value))
+    assert.ok(text.includes('SlotAssemblyError'), 'original error text missing from the modal')
 
     // Idempotent: a second fatal must not stack a second card.
     listeners.get('unhandledrejection')?.({ reason: fatal })
-    assert.equal(appended.filter((element) => element.id === 'dsh-phoenix-rescue').length, 1)
+    assert.equal(appended.filter((element) => element.id === 'dsh-phoenix-modal').length, 1)
 
     assert.ok(windowStub.__DSH_PHOENIX__, 'diagnostics handle missing')
     cleanup?.()

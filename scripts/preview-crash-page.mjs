@@ -11,6 +11,7 @@
  */
 
 import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 
 import { CRASH_ROUTE, DECIDE_ROUTE, STATUS_ROUTE, readChoice, renderCrashPage } from '../src/crash-page.js'
@@ -52,6 +53,65 @@ const report = {
 
 const chosen = []
 
+/**
+ * Serve a harness that loads the REAL client.js and fires a fatal error, so the
+ * modal is rendered by the actual code rather than a reimplementation of it.
+ */
+function modalHarness(clientSource) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>不死鸟 · 模态框预览</title>
+<style>
+  body { margin: 0; min-height: 100vh; background: #0f1116; color: #6b7891;
+         font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+         display: flex; align-items: center; justify-content: center; }
+  .behind { text-align: center; max-width: 420px; }
+  .behind h1 { font-size: 16px; color: #8b99b3; font-weight: 500; margin: 0 0 8px; }
+  .behind p { margin: 0; font-size: 13px; }
+  code { background: #1a1f2b; padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <div class="behind">
+    <h1>模拟的应用界面</h1>
+    <p>下面是真实 <code>client.js</code> 渲染出来的模态框。<br>
+       刷新页面可重现；点「进入复活模式」在预览里只会报错，这是预期。</p>
+  </div>
+<script>
+// Minimal stand-ins for the two globals client.js expects.
+window.__ModuleLoader__ = { load: function (entry) { window.__phoenixEntry = entry; } };
+</script>
+<script>${clientSource}</script>
+<script>
+(function () {
+  var entry = window.__phoenixEntry;
+  if (!entry) { document.title = '加载失败'; return; }
+  var mod = entry.factory();
+  var cleanups = [];
+  mod.apply({
+    effect: function (fn) {
+      var d = fn();
+      if (typeof d === 'function') cleanups.push(d);
+      return function () { if (typeof d === 'function') d(); };
+    },
+    remote: { $on: function () { return function () {}; } },
+  });
+
+  // Fire the exact shape the renderer produces for a whole-tree unmount.
+  var fatal = new Error("renderSlot('root') before any 'root' registration (boot order)");
+  fatal.name = 'SlotAssemblyError';
+  setTimeout(function () {
+    window.dispatchEvent(new ErrorEvent('error', { error: fatal, message: fatal.message }));
+  }, 200);
+})();
+</script>
+</body>
+</html>`
+}
+
 function sendHtml(res, html) {
   res.writeHead(200, {
     'content-type': 'text/html; charset=utf-8',
@@ -84,6 +144,19 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === CRASH_ROUTE && req.method === 'GET') {
     sendHtml(res, renderCrashPage(report))
+    return
+  }
+
+  if (url.pathname === '/phoenix/modal' && req.method === 'GET') {
+    let source
+    try {
+      source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+    } catch (error) {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(`could not read client.js: ${String(error)}`)
+      return
+    }
+    sendHtml(res, modalHarness(source))
     return
   }
 

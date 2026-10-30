@@ -25,10 +25,13 @@ import { join } from 'node:path'
 import { attribute, causeChain, describe, packageRoot } from './src/attribution.js'
 import { readQuarantined, writeQuarantine } from './src/quarantine.js'
 import { localDay, logPath, writeRecord } from './src/log.js'
-import { beginRecovery, crashPageUrl } from './src/recovery.js'
+import { beginRecovery, crashPageUrl, installRescueRoutes } from './src/recovery.js'
 import { describePackage } from './src/meta.js'
 import { restartCommand } from './src/self-restart.js'
 import { finalizeRemovals } from './src/finalize.js'
+import { scanComposition, summarizeComposition } from './src/health.js'
+import { spawnResurrectionSession, liveRows } from './src/recovery-session.js'
+import { createBlockingMonitor } from './src/blocking.js'
 
 /** The web carrier, when this composition has one. The service key is `webServer`. */
 function safeWebserver(ctx) {
@@ -300,6 +303,102 @@ export function apply(ctx, rawConfig) {
       process.removeListener('uncaughtException', onException)
       for (const listener of previousRejection) process.on('unhandledRejection', listener)
       for (const listener of previousException) process.on('uncaughtException', listener)
+    }
+  })
+
+  // Composition health: a fiber that threw during activation never reaches the
+  // process handlers. Cordis catches it, marks it FAILED, and reports over RPC,
+  // so the page loads while something the user needs is simply absent. Record
+  // what the loader itself believes, at activation.
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      let health
+      try {
+        health = scanComposition(ctx)
+      } catch (error) {
+        notify(`composition scan failed: ${describe(error).message}`)
+        return
+      }
+      record({
+        kind: 'composition-scan',
+        package: null,
+        rows: health.broken.map((row) => ({ id: row.id, name: row.name })),
+        decision: health.usable ? 'healthy' : 'degraded',
+        reason: summarizeComposition(health),
+        quarantinedIds: [],
+        error: null,
+        causes: [],
+        requiredBroken: health.requiredBroken.map((row) => row.id),
+      })
+      if (!health.usable) {
+        notify(
+          `DSH is running but ${health.requiredBroken.length} core row(s) are not active: ` +
+            `${health.requiredBroken.map((row) => `${row.id}(${row.state})`).join(', ')}. ` +
+            'Some capabilities will not work.',
+        )
+      }
+    }, 0)
+    return () => clearTimeout(timer)
+  })
+
+  // Session-level failures: the "page loads, but nothing works" case.
+  //
+  // No pattern matching. These messages are localized, reworded between
+  // releases, wrapped by RPC layers, and impossible to enumerate — a regex list
+  // is always one version behind, and a miss means the operator stays blocked.
+  //
+  // The signal is behavioural: consecutive session errors with no session
+  // surviving them. When that holds, the guard PREPARES a rescue session — an
+  // overlay that keeps every official row (and therefore every provider) while
+  // disabling everything the operator installed — and reports where it is.
+  //
+  // It does not switch the operator into it. The fault may be transient, and a
+  // rescue session spends their tokens. The error dialog offers the choice.
+  ctx.effect(() => {
+    const monitor = createBlockingMonitor({
+      ctx,
+      home,
+      profile: process.env.DSH_PROFILE,
+      record: (entry) => record(entry),
+      notify,
+    })
+
+    const disposers = []
+    const push = (dispose) => {
+      if (typeof dispose === 'function') disposers.push(dispose)
+    }
+
+    push(ctx.on('api-session/error', (sessionId, message) => monitor.onSessionError(sessionId, message)))
+    // A session that appears or runs is evidence DSH can still talk.
+    push(ctx.on('api-session/added', () => monitor.onSessionWorking()))
+    push(ctx.on('api-session/activity', () => monitor.onSessionWorking()))
+
+    push(
+      installRescueRoutes({
+        ctx,
+        prepared: () => monitor.prepared(),
+        launch: async () => {
+          const state = monitor.prepared()
+          if (state === undefined) return { ok: false, reason: 'not-prepared' }
+          const result = await spawnResurrectionSession({
+            ctx,
+            home,
+            profile: state.profile,
+            rows: liveRows(ctx),
+          })
+          return result
+        },
+      }),
+    )
+
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          /* listener teardown is best-effort */
+        }
+      }
     }
   })
 

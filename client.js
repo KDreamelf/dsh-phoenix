@@ -1,20 +1,29 @@
 /**
- * dsh-phoenix — Web rescue half.
+ * dsh-phoenix — the dialog the operator actually sees.
  *
- * Why native DOM and not a React component: the failure this covers is a
- * `SlotAssemblyError` thrown during render. The renderer's error boundaries
- * deliberately re-throw that family, and React then unmounts the whole tree —
- * every component, including any rescue UI built as one. A listener on `window`
- * is outside that tree, so it survives the unmount and can still draw.
+ * Why native DOM and not a React component: the failures this covers include
+ * `SlotAssemblyError`, which the renderer deliberately re-throws, after which
+ * React unmounts the whole tree — taking any React-based rescue UI with it. A
+ * listener on `window` is outside that tree, so it survives and can still draw.
  *
- * Scope: fatal signatures only. This is not a general error reporter; a normal
- * per-entry crash already degrades to a single empty slot and needs no rescue.
+ * Why a modal and not a toast: a toast is a line of text that disappears on its
+ * own. It cannot ask a question and it cannot be acted on. This failure needs the
+ * operator's decision — retry, or enter a rescue session — so it blocks, shows
+ * the original error, and offers both.
+ *
+ * Two triggers:
+ *   - the page is gone (fatal render error, white screen)
+ *   - DSH itself cannot work (the host reports repeated session failures)
+ *
+ * The plugin never decides on its own. A transient fault should retry, and a
+ * rescue session spends the operator's tokens.
  */
 
 const PKG = 'dsh-phoenix'
-const OVERLAY_ID = 'dsh-phoenix-rescue'
+const OVERLAY_ID = 'dsh-phoenix-modal'
+const RESCUE_ENDPOINT = '/phoenix/rescue'
 
-/** Signatures that mean "the page is gone", not "one widget broke". */
+/** Render errors that mean the page itself is gone, not one widget. */
 const FATAL = [
   'SlotAssemblyError',
   "before any 'root' registration",
@@ -34,127 +43,111 @@ function isFatal(error) {
 }
 
 function summarize(error) {
-  if (error === undefined || error === null) return 'Unknown failure'
+  if (error === undefined || error === null) return '未知错误'
   const name = typeof error.name === 'string' ? error.name : 'Error'
   const message = typeof error.message === 'string' ? error.message : String(error)
   return `${name}: ${message}`
 }
 
-function removeOverlay() {
+function el(tag, style, text) {
+  const node = document.createElement(tag)
+  if (style !== undefined) node.style.cssText = style
+  if (text !== undefined) node.textContent = text
+  return node
+}
+
+function removeModal() {
   const existing = document.getElementById(OVERLAY_ID)
   if (existing !== null) existing.remove()
 }
 
-function drawOverlay(detail) {
-  if (typeof document === 'undefined' || document.body === null) return
-  removeOverlay()
+/**
+ * Draw the modal.
+ *
+ * @param options.title - headline.
+ * @param options.detail - the original error, unedited.
+ * @param options.hint - one line about what the buttons do.
+ * @param options.onRescue - async; returns a URL to open or a reason it failed.
+ * @returns the overlay element.
+ */
+function drawModal(options) {
+  if (typeof document === 'undefined' || document.body === null) return undefined
+  removeModal()
 
-  const host = document.createElement('div')
+  const host = el(
+    'div',
+    [
+      'position:fixed',
+      'inset:0',
+      'z-index:2147483647',
+      'display:flex',
+      'align-items:center',
+      'justify-content:center',
+      'padding:24px',
+      'background:rgba(8,10,16,.74)',
+      'backdrop-filter:blur(6px)',
+      'font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
+      'color:#e8ecf4',
+    ].join(';'),
+  )
   host.id = OVERLAY_ID
   host.setAttribute('role', 'alertdialog')
+  host.setAttribute('aria-modal', 'true')
   host.setAttribute('aria-live', 'assertive')
-  host.style.cssText = [
-    'position:fixed',
-    'inset:0',
-    'z-index:2147483647',
-    'display:flex',
-    'align-items:center',
-    'justify-content:center',
-    'padding:24px',
-    'background:rgba(12,14,20,.72)',
-    'backdrop-filter:blur(6px)',
-    'font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif',
-    'color:#e8ecf4',
-  ].join(';')
 
-  const card = document.createElement('div')
-  card.style.cssText = [
-    'max-width:640px',
-    'width:100%',
-    'background:#171b26',
-    'border:1px solid #2b3245',
-    'border-radius:14px',
-    'padding:22px 22px 18px',
-    'box-shadow:0 18px 60px rgba(0,0,0,.5)',
-  ].join(';')
+  const card = el(
+    'div',
+    [
+      'width:100%',
+      'max-width:680px',
+      'background:#171b26',
+      'border:1px solid #2b3245',
+      'border-radius:14px',
+      'padding:22px',
+      'box-shadow:0 18px 60px rgba(0,0,0,.55)',
+    ].join(';'),
+  )
 
-  const title = document.createElement('div')
-  title.textContent = '界面渲染崩溃（不死鸟兜底）'
-  title.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:6px'
+  const title = el('div', 'font-size:17px;font-weight:650;margin-bottom:6px', options.title)
+  const hint = el('div', 'color:#9aa4bb;margin-bottom:14px', options.hint)
 
-  const hint = document.createElement('div')
-  hint.textContent = '页面结构已被框架卸载，但进程仍然存活，会话数据没有丢失。刷新即可恢复。'
-  hint.style.cssText = 'color:#9aa4bb;margin-bottom:14px'
+  const detail = el(
+    'pre',
+    [
+      'margin:0 0 16px',
+      'padding:11px 13px',
+      'max-height:220px',
+      'overflow:auto',
+      'background:#0f131c',
+      'border:1px solid #262d3d',
+      'border-radius:9px',
+      'font:12px/1.55 ui-monospace,Consolas,monospace',
+      'color:#c8d2e6',
+      'white-space:pre-wrap',
+      'word-break:break-word',
+    ].join(';'),
+    options.detail,
+  )
 
-  const detailBox = document.createElement('pre')
-  detailBox.textContent = detail
-  detailBox.style.cssText = [
-    'margin:0 0 16px',
-    'padding:10px 12px',
-    'max-height:180px',
-    'overflow:auto',
-    'background:#0f131c',
-    'border:1px solid #262d3d',
-    'border-radius:8px',
-    'font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace',
-    'color:#c8d2e6',
-    'white-space:pre-wrap',
-    'word-break:break-word',
-  ].join(';')
+  const status = el('div', 'margin-right:auto;align-self:center;color:#8b99b3;font-size:12px', '')
 
-  const actions = document.createElement('div')
-  actions.style.cssText = 'display:flex;gap:10px;justify-content:flex-end'
+  const actions = el('div', 'display:flex;gap:10px;align-items:center;flex-wrap:wrap')
 
-  const copy = document.createElement('button')
-  copy.type = 'button'
-  copy.textContent = '复制详情'
-  copy.style.cssText = [
-    'padding:8px 14px',
-    'border-radius:8px',
-    'border:1px solid #2b3245',
-    'background:transparent',
-    'color:#c8d2e6',
-    'cursor:pointer',
-    'font:inherit',
-  ].join(';')
-  copy.addEventListener('click', () => {
-    const text = detail
-    try {
-      if (navigator.clipboard?.writeText !== undefined) {
-        void navigator.clipboard.writeText(text)
-        copy.textContent = '已复制'
-        return
-      }
-    } catch {
-      /* fall through to the legacy path */
-    }
-    try {
-      const area = document.createElement('textarea')
-      area.value = text
-      document.body.appendChild(area)
-      area.select()
-      document.execCommand('copy')
-      area.remove()
-      copy.textContent = '已复制'
-    } catch {
-      copy.textContent = '复制失败'
-    }
-  })
-
-  const reload = document.createElement('button')
-  reload.type = 'button'
-  reload.textContent = '刷新页面'
-  reload.style.cssText = [
-    'padding:8px 14px',
-    'border-radius:8px',
-    'border:1px solid #3b6fe0',
-    'background:#2f5fd0',
-    'color:#fff',
-    'cursor:pointer',
-    'font:inherit',
-    'font-weight:600',
-  ].join(';')
-  reload.addEventListener('click', () => {
+  const retry = el(
+    'button',
+    [
+      'padding:9px 16px',
+      'border-radius:9px',
+      'border:1px solid #2f3748',
+      'background:transparent',
+      'color:#cdd8ea',
+      'cursor:pointer',
+      'font:inherit',
+    ].join(';'),
+    '再试一次（刷新页面）',
+  )
+  retry.type = 'button'
+  retry.addEventListener('click', () => {
     try {
       location.reload()
     } catch {
@@ -162,77 +155,161 @@ function drawOverlay(detail) {
     }
   })
 
-  actions.append(copy, reload)
-  card.append(title, hint, detailBox, actions)
+  const rescue = el(
+    'button',
+    [
+      'padding:9px 16px',
+      'border-radius:9px',
+      'border:1px solid #3b6fe0',
+      'background:#2f5fd0',
+      'color:#fff',
+      'cursor:pointer',
+      'font:inherit',
+      'font-weight:600',
+    ].join(';'),
+    '进入复活模式',
+  )
+  rescue.type = 'button'
+  rescue.addEventListener('click', async () => {
+    rescue.disabled = true
+    status.textContent = '正在准备复活会话…'
+    try {
+      const result = await options.onRescue()
+      if (result?.ok === true && typeof result.url === 'string') {
+        status.textContent = '已就绪，正在打开…'
+        try {
+          location.assign(result.url)
+        } catch {
+          status.textContent = `复活会话已就绪，请手动打开：${result.url}`
+        }
+        return
+      }
+      rescue.disabled = false
+      status.textContent = result?.message ?? result?.reason ?? '无法自动进入复活模式'
+    } catch (error) {
+      rescue.disabled = false
+      status.textContent = `无法自动进入复活模式：${summarize(error)}`
+    }
+  })
+
+  actions.append(status, retry, rescue)
+  card.append(title, hint, detail, actions)
   host.append(card)
   document.body.appendChild(host)
+  return host
 }
 
 window.__ModuleLoader__.load({
   id: PKG,
   factory() {
-    // The rescue must never become a second source of breakage: every entry
-    // point below swallows its own failure.
-    function safe(work) {
-      try {
-        work()
-      } catch {
-        /* a rescue that throws is worse than no rescue */
-      }
-    }
-
     return {
-      apply(ctx) {
-        const state = { shown: false, last: '' }
+      inject: ['remote'],
 
-        function handle(error, origin) {
-          safe(() => {
-            if (!isFatal(error)) return
-            const detail = summarize(error)
-            state.last = detail
-            if (state.shown) return
-            state.shown = true
-            drawOverlay(`${detail}\n\n[${origin}]\n${error?.stack ?? ''}`.trim())
+      apply(ctx) {
+        // A rescue must never become a second source of breakage.
+        const safe = (work) => {
+          try {
+            work()
+          } catch {
+            /* swallowing is correct here: the rescue cannot be the next fault */
+          }
+        }
+
+        let shown = false
+        let lastDetail = ''
+
+        const present = (title, detail, hint) => {
+          if (shown) return
+          shown = true
+          lastDetail = detail
+          drawModal({
+            title,
+            detail,
+            hint,
+            onRescue: async () => {
+              const response = await fetch(RESCUE_ENDPOINT, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ choice: 'rescue' }),
+              })
+              if (!response.ok) {
+                return {
+                  ok: false,
+                  message: `宿主拒绝了请求（HTTP ${String(response.status)}）。桌面端无法直接调用此接口，请在命令行运行：dsh-phoenix rescue`,
+                }
+              }
+              return await response.json()
+            },
           })
         }
 
-        const onError = (event) => handle(event?.error ?? new Error(String(event?.message ?? 'error')), 'window.error')
-        const onRejection = (event) => handle(event?.reason, 'unhandledrejection')
+        const onError = (event) => {
+          safe(() => {
+            const error = event?.error ?? new Error(String(event?.message ?? 'error'))
+            if (!isFatal(error)) return
+            present(
+              '界面已崩溃（不死鸟接管）',
+              `${summarize(error)}\n\n${error?.stack ?? ''}`.trim(),
+              '页面渲染出错，DSH 进程仍然存活。你可以先刷新重试，或者进入复活模式——它会保留你的模型配置，只停用你装的第三方插件。',
+            )
+          })
+        }
+
+        const onRejection = (event) => {
+          safe(() => {
+            const reason = event?.reason
+            if (!isFatal(reason)) return
+            present(
+              '界面已崩溃（不死鸟接管）',
+              `${summarize(reason)}\n\n${reason?.stack ?? ''}`.trim(),
+              '页面渲染出错，DSH 进程仍然存活。你可以先刷新重试，或者进入复活模式——它会保留你的模型配置，只停用你装的第三方插件。',
+            )
+          })
+        }
 
         ctx.effect(() => {
           window.addEventListener('error', onError)
           window.addEventListener('unhandledrejection', onRejection)
 
-          // Escape hatch for a blank page produced by something that never
-          // reached an error handler: ?phoenix=rescue forces the card.
+          // The host counts session failures and prepares a rescue when the
+          // streak proves DSH cannot talk. This only surfaces the native error
+          // text it recorded; nothing here classifies messages.
+          safe(() => {
+            const dispose = ctx.remote?.$on?.('api-session/error', (_sessionId, message) => {
+              present(
+                'DSH 无法开始对话（不死鸟接管）',
+                String(message ?? '(空错误)'),
+                '新建会话反复失败。你可以先重试，或者进入复活模式——保留你的模型配置，只停用第三方插件。',
+              )
+            })
+            if (typeof dispose === 'function') ctx.effect(() => dispose)
+          })
+
+          // Escape hatch when a failure never reached a handler.
           safe(() => {
             const params = new URLSearchParams(location.search)
             if (params.get('phoenix') === 'rescue') {
-              state.shown = true
-              drawOverlay('手动进入救援模式（?phoenix=rescue）')
+              shown = true
+              present('手动进入复活检查', '（由 ?phoenix=rescue 触发）', '如果你只是想看看这里有什么。')
             }
           })
 
           window.__DSH_PHOENIX__ = {
             version: '0.1.0',
-            reload: () => location.reload(),
-            force: () => {
-              state.shown = true
-              drawOverlay('手动触发')
-            },
             dismiss: () => {
-              removeOverlay()
-              state.shown = false
+              removeModal()
+              shown = false
             },
-            lastError: () => state.last,
+            reload: () => location.reload(),
+            lastError: () => lastDetail,
           }
 
           return () => {
             window.removeEventListener('error', onError)
             window.removeEventListener('unhandledrejection', onRejection)
-            removeOverlay()
+            removeModal()
             delete window.__DSH_PHOENIX__
-            state.shown = false
+            shown = false
           }
         })
       },
