@@ -177,6 +177,42 @@ rm -rf ~/.dsh/logs/crash-guard
 
 顺带一个只有实测才看得到的事实：`/phoenix/rescue` 没有走 `/api` 那道浏览器信任栅栏，未带 token 的请求也能到达（`/` 是 401，`/phoenix/rescue` 是 200）。它不返回任何数据，最坏情况是一个本地进程替你准备一次复活——但这一层要不要加校验，是个待定项。
 
+## 复活模式全链路（真实进程）
+
+这是**只有跑真进程才会暴露**的那一类 bug，全部已修，记录如下。
+
+```bash
+rm -f ~/.dsh/cordis.patch.yml ~/.dsh/logs/crash-guard/rescue-state.json
+dsh --profile phoenix-dev --no-open --port 3112    # 这个 profile 装了 fake-crashy，6 秒后崩
+sleep 13
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"choice":"rescue"}' http://127.0.0.1:3112/phoenix/rescue
+```
+
+期望（实测通过）：
+
+```json
+{"ok":true,"url":"http://127.0.0.1:50414/","pid":6956,
+ "overlayPath":"...\\logs\\crash-guard\\resurrection.patch.yml","disabled":[]}
+```
+
+再确认它真的在服务，而不是只回了一个 URL：
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:50414/         # 401 = 起来了
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:50414/phoenix/rescue  # 200 = 守护也在
+```
+
+| 检查点 | 结果 |
+|---|---|
+| 复活路由存在 | `404 → 200`（修复前在多数 profile 上根本没注册） |
+| 启动参数 | 重建而非追加；`--profile` 只出现一次，脚本路径紧跟可执行文件 |
+| profile 来源 | `profileContext.name`；不再被继承来的 `DSH_PROFILE` 带偏 |
+| 复活会话存活 | `dev` 端口回 `401`，`/phoenix/rescue` 回 `200` |
+| 自救套娃 | 修复后拒绝：`{"ok":false,"reason":"already-rescue-session"}` |
+| 死掉的子进程 | `waitForPort` 判定失败并 kill，不再回一个打不开的 URL |
+| profile 文件 | `~/.dsh/cordis.patch.yml` 与 `profiles/phoenix-dev/cordis.patch.yml` 全程未被救援路径写过 |
+
 ## 已知未覆盖：组合层 / 服务层故障
 
 这类报错不会杀死进程，但会让新对话或某些操作直接失败：
