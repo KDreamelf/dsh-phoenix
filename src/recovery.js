@@ -37,7 +37,7 @@ import {
   renderCrashPage,
 } from './crash-page.js'
 import { readQuarantined, writeQuarantine } from './quarantine.js'
-import { describeRescueFailure } from './recovery-session.js'
+import { describeRescueFailure, profileName } from './recovery-session.js'
 import { spawnReplacement } from './self-restart.js'
 
 /** How long the process waits for an operator before giving up. */
@@ -200,7 +200,7 @@ export function beginRecovery(options) {
           markPendingRemove(home, {
             package: report.package,
             rowIds: ids,
-            profile: process.env.DSH_PROFILE ?? null,
+            profile: profileName(ctx) ?? null,
           })
           message += '（卸载排队中，重启后由 CLI 或下次启动完成）'
         } catch (error) {
@@ -354,69 +354,99 @@ export const RESCUE_ROUTE = '/phoenix/rescue'
  * Mount the rescue endpoint for the whole life of the session.
  *
  * This is not part of the crash hold: it must answer while DSH is running badly,
- * which is exactly when the error dialog offers it. A browser page can call it;
- * the Desktop renderer loads over `file://` and cannot, so the dialog there
- * shows the equivalent command rather than a button that cannot work.
+ * which is exactly when the error dialog offers it.
  *
- * @param options.ctx - plugin context.
+ * Registration has to WAIT for the web server. A plugin's `apply` runs as soon as
+ * its own dependencies resolve, and a composition lists rows in an order that
+ * does not promise the web server went first — so reading `ctx.get('webServer')`
+ * at apply time returns undefined on some profiles and the route silently does
+ * not exist. That is not a hypothetical: on a profile where `dsh-phoenix` is
+ * listed after the app bundle, this endpoint answered 404 while the crash page
+ * (registered later, during the fault) worked fine. `ctx.inject` waits for the
+ * service and tears the route down with the plugin, which is the ordering this
+ * needs and cannot get from the row order.
+ *
+ * @param options.ctx - plugin context; the web server is taken from it when
+ *   already injected, otherwise the registration waits for that service.
  * @param options.prepared - returns the prepared rescue state, or undefined.
  * @param options.launch - starts the rescue session, returns `{ ok, url? }`.
- * @returns a disposer, or a no-op when there is no carrier.
+ * @returns an object whose `dispose` unmounts whatever was mounted.
  */
 export function installRescueRoutes(options) {
-  const webserver = (() => {
+  const mount = (webserver) => {
+    if (webserver === undefined || typeof webserver.register !== 'function') return undefined
+
+    const disposers = []
+    const register = (path, handler) => {
+      disposers.push(webserver.register({ kind: 'exact', path, handler }))
+    }
+
+    try {
+      register(RESCUE_ROUTE, async (req, res) => {
+        if (req.method === 'GET') {
+          sendJson(res, 200, { ok: true, prepared: options.prepared() ?? null })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        await readBody(req)
+        const result = await options.launch()
+        // Translate here, not in the browser: every caller of this endpoint
+        // would otherwise need to know the internal codes, and the dialog is
+        // the one place a machine identifier must never surface.
+        const payload =
+          result?.ok === true ? result : { ...result, message: describeRescueFailure(result?.reason) }
+        sendJson(res, result?.ok === true ? 200 : 500, payload)
+      })
+    } catch {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          /* best effort */
+        }
+      }
+      return undefined
+    }
+
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          /* teardown is best effort */
+        }
+      }
+    }
+  }
+
+  const immediate = (() => {
     try {
       return options.ctx.get?.('webServer')
     } catch {
       return undefined
     }
   })()
-  if (webserver === undefined || typeof webserver.register !== 'function') return () => {}
 
-  const disposers = []
-  try {
-    disposers.push(
-      webserver.register({
-        kind: 'exact',
-        path: RESCUE_ROUTE,
-        handler: async (req, res) => {
-          if (req.method === 'GET') {
-            sendJson(res, 200, { ok: true, prepared: options.prepared() ?? null })
-            return
-          }
-          if (req.method !== 'POST') {
-            sendJson(res, 405, { ok: false, error: 'method not allowed' })
-            return
-          }
-          await readBody(req)
-          const result = await options.launch()
-          // Translate here, not in the browser: every caller of this endpoint
-          // would otherwise need to know the internal codes, and the dialog is
-          // the one place a machine identifier must never surface.
-          const payload =
-            result?.ok === true ? result : { ...result, message: describeRescueFailure(result?.reason) }
-          sendJson(res, result?.ok === true ? 200 : 500, payload)
-        },
-      }),
-    )
-  } catch (error) {
-    for (const dispose of disposers) {
-      try {
-        dispose()
-      } catch {
-        /* best effort */
-      }
-    }
-    return () => {}
+  if (immediate !== undefined) {
+    const dispose = mount(immediate)
+    return dispose ?? (() => {})
   }
 
+  // Not injected yet: wait for the service instead of giving up on it. The
+  // fiber is created through the plugin context, so it unloads with the plugin.
+  const child = options.ctx.inject?.(['webServer'], (scope) => {
+    mount(scope.webServer ?? scope.get?.('webServer'))
+  })
+  if (child === undefined) return () => {}
+
   return () => {
-    for (const dispose of disposers) {
-      try {
-        dispose()
-      } catch {
-        /* teardown is best effort */
-      }
+    try {
+      void child.dispose?.()
+    } catch {
+      /* teardown is best effort */
     }
   }
 }

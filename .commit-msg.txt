@@ -1,0 +1,39 @@
+fix(rescue): make the rescue actually launch — three defects a live probe found
+
+None of these were reachable from the fake host the tests used, and all three
+produced the same symptom: a rescue that reported success and a URL that never
+loaded.
+
+1. The route was never registered on most profiles. Reading
+   ctx.get('webServer') during apply() returns undefined whenever the row is
+   listed before the web server exists, and the composition order does not
+   promise otherwise. Registration now waits with ctx.inject(['webServer']), so
+   the endpoint exists for the life of the session on every profile. Measured:
+   /phoenix/rescue went from 404 to 200 on a profile where dsh-phoenix is listed
+   after the app bundle.
+
+2. The launcher argv was appended to instead of rebuilt. Adding --profile to an
+   argv that already had one produced "error: unknown option '--profile'",
+   because the launcher stops parsing its own flags once app arguments begin.
+   buildRescueArgv now drops the launcher flags and re-emits exactly one of
+   each, keeps the operator's own app flags, and excludes argv[0] because that
+   is what spawn(execPath, args) expects — forwarding it made the child try to
+   run node.exe as a script.
+
+3. The profile came from process.env.DSH_PROFILE. That variable is inherited by
+   every child process, so a host booted with --profile phoenix-dev from a shell
+   that says desktop rescued into 'desktop' and refused itself as app-managed.
+   The booted profile is profileContext.name; the environment is now only a
+   fallback. A prepared state read back from disk is discarded when it names a
+   different profile, since one file under the home directory is shared by all.
+
+Two more found while verifying:
+
+- A rescue session could launch another rescue session (confirmed against a
+  live one: it answered with a second URL). The chain is unbounded and each link
+  spends tokens, so spawnResurrectionSession now refuses inside a rescue. The
+  guard stays armed there — containment just must not escalate.
+- A child that died on startup was still reported as success. It is detached
+  with stdio ignored, so there is no exit code to read; waitForPort is the only
+  available signal. The process is killed and the launch reported as failed.
+

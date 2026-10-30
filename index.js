@@ -30,7 +30,7 @@ import { describePackage } from './src/meta.js'
 import { restartCommand } from './src/self-restart.js'
 import { finalizeRemovals } from './src/finalize.js'
 import { scanComposition, summarizeComposition } from './src/health.js'
-import { spawnResurrectionSession, liveRows } from './src/recovery-session.js'
+import { spawnResurrectionSession, liveRows, profileName } from './src/recovery-session.js'
 import { createBlockingMonitor } from './src/blocking.js'
 
 /** The web carrier, when this composition has one. The service key is `webServer`. */
@@ -153,7 +153,6 @@ export function apply(ctx, rawConfig) {
           await spawnResurrectionSession({
             ctx,
             home,
-            profile: process.env.DSH_PROFILE,
             rows: liveRows(ctx),
           }),
       })
@@ -372,7 +371,6 @@ export function apply(ctx, rawConfig) {
     const monitor = createBlockingMonitor({
       ctx,
       home,
-      profile: process.env.DSH_PROFILE,
       record: (entry) => record(entry),
       notify,
     })
@@ -395,12 +393,23 @@ export function apply(ctx, rawConfig) {
           // The dialog shows on the first error; preparation waits for the
           // second. A fast click must still work, so prepare on demand — the
           // click is the consent this plugin always waits for.
-          const state = monitor.prepared() ?? monitor.prepareNow('operator-requested')
+          //
+          // A prepared state read back from disk may belong to a different
+          // profile (it is one file under the home directory, shared by every
+          // profile). Rescuing the wrong profile is not a rescue, so a
+          // mismatch re-prepares against the one that is actually running.
+          const current = profileName(ctx)
+          const prior = monitor.prepared()
+          const state =
+            prior !== undefined && (current === undefined || prior.profile === current)
+              ? prior
+              : monitor.prepareNow('operator-requested')
           if (state === undefined) return { ok: false, reason: 'rescue-unavailable' }
           return await spawnResurrectionSession({
             ctx,
             home,
-            profile: state.profile,
+            // The running profile is authoritative, never a file.
+            profile: current ?? state.profile,
             rows: liveRows(ctx),
           })
         },

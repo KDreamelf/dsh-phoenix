@@ -17,13 +17,12 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { liveRows, prepareResurrection } from './recovery-session.js'
+import { RESURRECTED_ENV, isRescueSession, liveRows, prepareResurrection, profileName } from './recovery-session.js'
 
 /** Consecutive session errors that mean "DSH cannot talk", not "one call failed". */
 export const BLOCKING_THRESHOLD = 2
 
-/** Set inside a rescue session so it never tries to rescue itself. */
-export const RESURRECTED_ENV = 'DSH_PHOENIX_RESURRECTED'
+export { RESURRECTED_ENV }
 
 export function rescueStatePath(home) {
   return join(home, 'logs', 'crash-guard', 'rescue-state.json')
@@ -59,15 +58,15 @@ function writeRescueState(home, state) {
  */
 export function createBlockingMonitor(options) {
   const { home, record, notify } = options
-  const profile = options.profile ?? process.env.DSH_PROFILE
-  const isRescueSession = process.env[RESURRECTED_ENV] === '1'
+  const profile = options.profile ?? profileName(options.ctx)
+  const isRescue = options.isRescueSession ?? isRescueSession()
 
   let consecutive = 0
   let preparing = false
   let last
 
   const prepare = (cause) => {
-    if (isRescueSession || preparing) return last
+    if (isRescue || preparing) return last
     preparing = true
     try {
       const overlay = prepareResurrection({ home, rows: liveRows(options.ctx) })

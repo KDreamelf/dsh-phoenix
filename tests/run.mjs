@@ -699,6 +699,114 @@ await test('crash page: the unattributable note is a safe mode, not a threat', (
   assert.ok(!html.includes('所以不会自动禁用任何东西'))
 })
 
+await test('rescue: a rescue session refuses to launch another one', async () => {
+  // Found by probing a live rescue session: it answered the same POST with a new
+  // URL, so one fault could spawn a chain of sessions, each spending tokens and
+  // each a fresh chance to break. The guard stays armed inside a rescue so a
+  // second fault is still contained — containment just must not escalate.
+  const result = await recoverySession.spawnResurrectionSession({
+    ctx: { get: () => undefined },
+    home: freshHome('rescue-loop'),
+    profile: 'demo',
+    env: { [recoverySession.RESURRECTED_ENV]: '1' },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'already-rescue-session')
+  assert.ok(recoverySession.describeRescueFailure(result.reason).length > 10)
+})
+
+await test('rescue: the launcher argv is rebuilt, not appended to', () => {
+  // The bug this locks: appending `--profile` produced
+  //   dsh --profile x --no-open --port 3109 --profile x --patch o ...
+  // and the launcher, which stops parsing once the app args begin, rejected
+  // the second --profile with "unknown option" and exited. stdio was ignored,
+  // so the failure was invisible and the operator got a URL that never loaded.
+  const args = recoverySession.buildRescueArgv({
+    argv: ['node', 'E:/dsh/bin.js', '--profile', 'old', '--patch', 'a.yml', '--no-open', '--port', '3109', '--trusted-host', 'x.local'],
+    profile: 'demo',
+    overlayPath: 'C:/ov.yml',
+    port: 4321,
+  })
+  // spawn(execPath, args): the executable must NOT be repeated in args, and the
+  // script must come first — getting either wrong makes the child run nothing.
+  assert.equal(args[0], 'E:/dsh/bin.js')
+  assert.ok(!args.includes('node'), 'argv[0] must not be forwarded')
+  // Exactly one of each launcher flag survives.
+  assert.equal(args.filter((value) => value === '--profile').length, 1)
+  assert.equal(args.filter((value) => value === '--patch').length, 1)
+  assert.equal(args.filter((value) => value === '--port').length, 1)
+  assert.equal(args[args.indexOf('--profile') + 1], 'demo')
+  assert.equal(args[args.indexOf('--patch') + 1], 'C:/ov.yml')
+  assert.equal(args[args.indexOf('--port') + 1], '4321')
+  // An app flag the operator chose is preserved.
+  assert.ok(args.includes('--trusted-host') && args.includes('x.local'))
+  // Launcher flags come before the app arguments.
+  assert.ok(args.indexOf('--profile') < args.indexOf('--trusted-host'))
+})
+
+await test('rescue: a process that never listens is reported as a failure', async () => {
+  // Both a success and a failure must be honest: an advertised URL that never
+  // answers is worse than a clear error.
+  assert.equal(await recoverySession.waitForPort(1, 300), false)
+})
+
+await test('rescue: the booted profile wins over the inherited environment', () => {
+  // The real failure: a host booted with `--profile phoenix-dev` from a shell
+  // whose environment says `desktop` reported `desktop`, and the rescue refused
+  // itself as "app managed". DSH_PROFILE is inherited by every child process,
+  // so it can never outrank what the launcher actually booted.
+  const previous = process.env.DSH_PROFILE
+  process.env.DSH_PROFILE = 'desktop'
+  try {
+    const booted = recoverySession.profileName({ get: (service) => (service === 'profileContext' ? { name: 'phoenix-dev' } : undefined) })
+    assert.equal(booted, 'phoenix-dev')
+    // No service (older host): the environment is still better than nothing.
+    assert.equal(recoverySession.profileName({ get: () => undefined }), 'desktop')
+    // An unreadable service must not throw.
+    assert.equal(
+      recoverySession.profileName({ get: () => { throw new Error('nope') } }),
+      'desktop',
+    )
+  } finally {
+    if (previous === undefined) delete process.env.DSH_PROFILE
+    else process.env.DSH_PROFILE = previous
+  }
+})
+
+await test('rescue: registration waits for the web server instead of giving up', async () => {
+  // The real failure this covers: a composition that lists dsh-phoenix before
+  // the app's web server is ready. Reading ctx.get('webServer') at apply time
+  // returned undefined, the route was never registered, and the dialog's button
+  // answered 404 for the whole life of the session.
+  const routes = new Map()
+  const used = []
+  const ctx = {
+    get: () => undefined,
+    inject(deps, callback) {
+      used.push(deps)
+      // Stand in for cordis: the callback runs once the service exists.
+      queueMicrotask(() =>
+        callback({
+          webServer: {
+            register: (route) => {
+              routes.set(route.path, route)
+              return () => routes.delete(route.path)
+            },
+          },
+        }),
+      )
+      return { dispose() {} }
+    },
+  }
+
+  const dispose = recovery.installRescueRoutes({ ctx, prepared: () => null, launch: async () => ({ ok: true }) })
+  assert.deepEqual(used, [['webServer']], 'must wait for the web server by name')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(routes.has(recovery.RESCUE_ROUTE), 'the route must appear once the service is injected')
+
+  dispose()
+})
+
 await test('rescue: a refused launch answers in words, never in a machine code', async () => {
   const routes = new Map()
   const dispose = recovery.installRescueRoutes({
